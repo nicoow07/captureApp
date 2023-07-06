@@ -1,0 +1,490 @@
+package com.example.camera_params;
+
+import static androidx.constraintlayout.helper.widget.MotionEffect.TAG;
+
+import androidx.annotation.NonNull;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+
+import android.Manifest;
+import android.app.Activity;
+import android.content.Context;
+import android.content.pm.PackageManager;
+import android.graphics.ImageFormat;
+import android.graphics.SurfaceTexture;
+import android.hardware.camera2.CameraAccessException;
+import android.hardware.camera2.CameraCaptureSession;
+import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraDevice;
+import android.hardware.camera2.CameraManager;
+import android.hardware.camera2.CameraMetadata;
+import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.params.StreamConfigurationMap;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.util.ArrayMap;
+import android.util.Log;
+import android.util.Size;
+import android.view.Surface;
+import android.view.TextureView;
+import android.view.View;
+import android.widget.Button;
+import android.widget.TextView;
+
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.util.Arrays;
+
+public class MainActivity extends Activity {
+    public static final String CAMERA_SHUTTER_SPEED = "";// matches with 1/4000
+    public static final String CAMERA_ISO = "";//
+    public static final String CAMERA_FOCUS = "";//
+    private static final int CAMERA_REQUEST_CODE = 234;
+    private Button mRefreshBtn;
+    private Button mCaptureBtn;
+    private TextView mShutterSpeedTextView;
+    private TextView mFocusTextView;
+    private TextView mIsoTextView;
+    private TextView mWbBalanceTextView;
+    private TextureView mTextureView;
+    private ArrayMap<String, String> mCurrentCameraParamsMap;
+    //===CAMERA variables====
+    private CameraManager mCamManager;
+    private CameraCharacteristics mCamCharacteristics;
+    private String mBackCamId;
+    private Size mPreviewSize;
+    private CameraDevice.StateCallback mCameraOpenCallback;
+    private CameraDevice mCameraDevice;
+    // Preview
+    private CaptureRequest.Builder mPreviewCaptureBuilder;
+    private CameraCaptureSession mPreviewSession;
+    //Capture
+    private CaptureRequest.Builder mShotCaptureBuilder;
+    private CameraCaptureSession mShotSession;
+    private Tex
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+
+        //INIT VARIABLES
+        mCurrentCameraParamsMap = new ArrayMap<String, String>();
+        //Retrieve UI widgets
+        mShutterSpeedTextView = (TextView) findViewById(R.id.shutterSpeedTextView);
+        mFocusTextView = (TextView) findViewById(R.id.focusTextView);
+        mIsoTextView = (TextView) findViewById(R.id.isoTextView);
+        mWbBalanceTextView = (TextView) findViewById(R.id.wbBalanceTextView);
+        mTextureView = (TextureView) findViewById(R.id.textureView);
+        //Create the surface listener which will trigger openCamera() when the surface is ready to be used
+        mTextureView.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
+            @Override
+            public void onSurfaceTextureAvailable(@NonNull SurfaceTexture surfaceTexture, int i, int i1) {
+                Log.i("Surface texture", "onSurfaceTextureAvailable");
+                openCamera();
+            }
+
+            @Override
+            public void onSurfaceTextureSizeChanged(@NonNull SurfaceTexture surfaceTexture, int i, int i1) {
+                Log.i("Surface texture", "onSurfaceTextureSizeChanged");
+            }
+
+            @Override
+            public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture surfaceTexture) {
+                Log.i("Surface texture", "onSurfaceTextureDestroyed");
+                return true;
+            }
+
+            @Override
+            public void onSurfaceTextureUpdated(@NonNull SurfaceTexture surfaceTexture) {
+                //Called every time the surface is updated
+            }
+        });
+
+        //Set refresh button callback
+        mRefreshBtn = (Button) findViewById(R.id.refreshBtn);
+        mRefreshBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                new fetchCameraParams().start();
+            }
+        });
+
+        //Set capture btn callback
+        mCaptureBtn = (Button) findViewById(R.id.captureBtn);
+        mCaptureBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                takeShot();
+            }
+        });
+
+        mPreviewSize = new Size(768, 1024);
+        mCameraOpenCallback = new CameraDevice.StateCallback() {
+            @Override
+            public void onOpened(CameraDevice camera) {
+                Log.e(TAG, "onOpened");
+                mCameraDevice = camera;
+                //Start preview
+                startPreview();
+                //Set capture params
+                setCameraShotRequest();
+            }
+
+            @Override
+            public void onDisconnected(CameraDevice camera) {
+                Log.e(TAG, "onDisconnected");
+            }
+
+            @Override
+            public void onError(CameraDevice camera, int error) {
+                Log.e(TAG, "onError");
+            }
+        };
+
+        //Retrieve automatically the JSON FILE with camera settings
+        new fetchCameraParams().start();
+
+        try {
+            //Initialize Camera manager, once adn for all
+            mCamManager = (CameraManager) this.getSystemService(Context.CAMERA_SERVICE);
+
+            //Get the camera ID for the back (not selfie) camera
+            mBackCamId = getBackFacingCameraID();
+            Log.i("Back facing camera ID", mBackCamId);
+
+            //Retrieve the characteristics of the back facing camera
+            mCamCharacteristics = mCamManager.getCameraCharacteristics(mBackCamId);
+            //Print in log the supported picture format
+            logOutputSizes();
+            //Print the available auto exposure modes
+            logAutoExposureAvailableModes();
+
+        } catch (CameraAccessException e) {
+            Log.e(TAG, "Cannot get camera characteristics");
+            throw new RuntimeException();
+        }
+
+
+        //Check the camera supports manual settings change
+        Boolean camManualParamSettingAvailable = null;
+        try {
+            camManualParamSettingAvailable = checkCamManualParamSettingAllowed(mBackCamId);
+        } catch (CameraAccessException e) {
+            Log.e(TAG, "Cannot check if camera supports Manual_Sensor");
+            throw new RuntimeException();
+        }
+
+        //If camera supports manual sensor, open it
+        if (camManualParamSettingAvailable) {
+            Log.i("MANUAL SENSOR", "SUPPORTED");
+            openCamera();
+        } else {
+            Log.i("MANUAL SENSOR", "NOT SUPPORTED");
+            //TO DELETE WHEN GOT FIFI'S PHONE
+            //openCamera();
+        }
+
+        //If camera supports manual sensor, set camera params with fetched params from server.
+
+
+    }
+
+    //Print in log.i the output sizes supported under JPG format of the camera ID passed in argument
+    public void logOutputSizes() {
+        StreamConfigurationMap configs = mCamCharacteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+        //Display output sizes (under jpg format)
+        Size[] sizes = configs.getOutputSizes(ImageFormat.JPEG);
+        if (sizes == null) {
+            Log.i("---Picture sizes---", "JPG format not supported");
+        } else {
+            for (Size size : sizes) {
+                Log.i("---Picture sizes---", size.toString());
+            }
+        }
+    }
+
+    //Print in log.i the auto exposure modes available on the camera
+    public void logAutoExposureAvailableModes() {
+        final int[] availableAeModes = mCamCharacteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES);
+        for(int mode : availableAeModes){
+            Log.d("AE mode :", String.valueOf(mode));
+        }
+    }
+
+    // Function called by class fetchCameraParams when the data are retrieved from server
+    public void displayCameraParams(JSONObject jsonObj) {
+        Log.i("FETCHED CAMERA PARAMS", jsonObj.toString());
+        //Extract data from JSON to array map
+        try {
+            mCurrentCameraParamsMap.put("shutter_speed", jsonObj.getString("shutter_speed"));
+            mCurrentCameraParamsMap.put("focus", jsonObj.getString("focus"));
+            mCurrentCameraParamsMap.put("iso", jsonObj.getString("iso"));
+            mCurrentCameraParamsMap.put("wb_balance", jsonObj.getString("wb_balance"));
+            mCurrentCameraParamsMap.put("capture_per_sec", jsonObj.getString("capture_per_sec"));
+        } catch (JSONException e) {
+            throw new RuntimeException(e);
+        }
+
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                mShutterSpeedTextView.setText("Shutter speed: " + "1/" + mCurrentCameraParamsMap.get("shutter_speed"));
+                mFocusTextView.setText("Focus: " + mCurrentCameraParamsMap.get("focus"));
+                mIsoTextView.setText("ISO: " + mCurrentCameraParamsMap.get("iso"));
+                mWbBalanceTextView.setText("W&B balance: " + mCurrentCameraParamsMap.get("wb_balance"));
+            }
+        });
+
+
+    }
+
+    public String getBackFacingCameraID() throws CameraAccessException {
+        // Get the camera manager
+
+        //Get the camera ID for the back (not selfie) camera
+        String[] cameraIds = mCamManager.getCameraIdList();
+        Log.i("----Number of camera available on device---- ", String.valueOf(cameraIds.length));
+        String backCameraID = "";
+        for (String camId : cameraIds) {
+            CameraCharacteristics characteristics = mCamManager.getCameraCharacteristics(camId);
+            if (characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK) {
+                backCameraID = camId;
+            }
+        }
+        return backCameraID;
+    }
+
+    //Check if the params Focus, shutter speed, ISO and W&B balance can be manually changed.
+    // Returns true if camera has MANUAL_SENSOR capability
+    public Boolean checkCamManualParamSettingAllowed(String camId) throws CameraAccessException {
+        Boolean allParamsChangeable = true;
+        //Get camera supported capabilities
+        int[] capabilities = mCamCharacteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
+
+        //Check if camera has Manual sensor capability
+        Boolean cameraHasManualSensorCapability = false;
+        for (int capability : capabilities) {
+            if (capability == CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) {
+                cameraHasManualSensorCapability = true;
+            }
+        }
+
+        return cameraHasManualSensorCapability;
+    }
+
+    //========CAMERA 2 API HANDLING==============
+
+    public void openCamera() {
+        Log.i(TAG, "Opening camera...");
+        try {
+            StreamConfigurationMap map = mCamCharacteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            Log.i(TAG, "Selected preview size is: " + mPreviewSize.toString());
+
+            //Runtime camera permission request
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_DENIED) {
+                ActivityCompat.requestPermissions(MainActivity.this, new String[]{Manifest.permission.CAMERA}, CAMERA_REQUEST_CODE);
+                Log.i("----Permissions---- ", "Requesting camera permission at run time");
+            }
+            mCamManager.openCamera(mBackCamId, mCameraOpenCallback, null);
+        } catch (CameraAccessException e) {
+            Log.e(TAG, "CameraAccessException when opening the camera");
+            e.printStackTrace();
+        }
+    }
+
+    public void startPreview(){
+        Log.i(TAG,"Starting preview");
+        //Check cameraDevice object is working
+        if(mCameraDevice == null){
+            Log.e(TAG, "startPreview fail, Camera Device == null");
+            return;
+        } else if (!mTextureView.isAvailable()) {
+            Log.e(TAG, "startPreview fail, Texture view is not available");
+            return;
+        }
+
+        //Get the surfaceTexture to display the shots
+        SurfaceTexture texture = mTextureView.getSurfaceTexture();
+        if(null == texture) {
+            Log.e(TAG,"texture is null, return");
+            return;
+        }
+
+        //Initialise texture & surface
+        texture.setDefaultBufferSize(mPreviewSize.getWidth(), mPreviewSize.getHeight());
+        Surface surface = new Surface(texture);
+
+        //Get a capture request
+        try {
+            mPreviewCaptureBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+        //Connect the camera preview to the surface
+        mPreviewCaptureBuilder.addTarget(surface);
+
+        try {
+            //Create a capture session for the preview. (it holds the parameters we want to set for the camera)
+            mCameraDevice.createCaptureSession(Arrays.asList(surface), new CameraCaptureSession.StateCallback() {
+
+                @Override
+                public void onConfigured(CameraCaptureSession session) {
+                    Log.i(TAG, "CAPTURE SESSION READY");
+                    mPreviewSession = session;
+                    updatePreview();
+                }
+
+                @Override
+                public void onConfigureFailed(CameraCaptureSession session) {
+                    Log.e(TAG,"onConfiguration failed.");
+                }
+            }, null);
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void updatePreview(){
+        Log.i(TAG, "updatePreview()");
+        if(mCameraDevice == null) {
+            Log.e(TAG, "updatePreview error, return");
+            return;
+        }
+        if(mPreviewCaptureBuilder == null){
+            Log.i(TAG, "mPreviewCaptureBuilder not ready yet to updatePreview");
+            return;
+        }
+
+        //Enable auto-exposure + auto w-b balance + auto focus
+        //mPreviewCaptureBuilder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_OFF);
+        //Disable auto Exposure
+        mPreviewCaptureBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH);
+        //Set ISO level according to the camera params stored in mCurrentCameraParamsMap
+        //Log.i(TAG, "Setting ISO level to: " + mCurrentCameraParamsMap.get("iso"));
+        //mPreviewCaptureBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, Integer.valueOf(mCurrentCameraParamsMap.get("iso")));
+
+
+        //Create a thread to send capture request in loop.
+        HandlerThread thread = new HandlerThread("CameraPreview");
+        thread.start();
+        Handler backgroundHandler = new Handler(thread.getLooper());
+
+        try {
+            mPreviewSession.setRepeatingRequest(mPreviewCaptureBuilder.build(), null, backgroundHandler);
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void setCameraShotRequest(){
+        try {
+            mShotCaptureBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+            throw new RuntimeException(e);
+        }
+
+        //Connect the camera preview to the surface
+        mPreviewCaptureBuilder.addTarget(surface);
+
+        try {
+            //Create a capture session for the preview. (it holds the parameters we want to set for the camera)
+            mCameraDevice.createCaptureSession(Arrays.asList(surface), new CameraCaptureSession.StateCallback() {
+
+                @Override
+                public void onConfigured(CameraCaptureSession session) {
+                    Log.i(TAG, "CAPTURE SESSION READY");
+                    mPreviewSession = session;
+                    updatePreview();
+                }
+
+                @Override
+                public void onConfigureFailed(CameraCaptureSession session) {
+                    Log.e(TAG,"onConfiguration failed.");
+                }
+            }, null);
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public void takeShot(){
+        Log.i(TAG, "takeShot()");
+        if(mCameraDevice == null | mPreviewCaptureBuilder == null) {
+            Log.e(TAG, "takeShot error: camera is null or capture builder");
+            return;
+        }
+
+        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH);
+        mShotCaptureBuilder.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE);
+        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, CaptureRequest.CONTROL_AE_STATE_FLASH_REQUIRED);
+        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_CANCEL);
+        mShotCaptureBuilder.addTarget(mCaptureBuffer.getSurface());
+
+        try {
+            mShotSession.capture(mShotCaptureBuilder.build(), null, null);
+        } catch (CameraAccessException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    //Class to retrieve JSON file with camera parameters from remote server to ease config without rebuilding the app, and without building UI
+    //Whenever the JSON file is retrieved from the server, the preview is updated with the new parameters. updatePreview() is called.
+    public class fetchCameraParams extends Thread{
+        //private static final String fileURLStr = "http://192.168.0.105:8080/camera_parameters.json";// Home IP
+        private static final String fileURLStr = "http://192.168.8.103:8080/camera_parameters.json";// Work IP
+        String data = "";
+        JSONObject jsonFile = null;
+
+        @Override
+        public void run() {
+            try{
+                //Init jsonFile with dummy values
+                jsonFile = new JSONObject();
+                jsonFile.put("shutter_speed", "1/?");
+                jsonFile.put("focus", "?");
+                jsonFile.put("iso", "?");
+                jsonFile.put("wb_balance", "?");
+                jsonFile.put("capture_per_sec", "0");
+
+                URL url = new URL(fileURLStr);
+                HttpURLConnection httpUrlCnx = (HttpURLConnection) url.openConnection();
+                InputStream inputstream = httpUrlCnx.getInputStream();
+                BufferedReader buffReader = new BufferedReader(new InputStreamReader(inputstream));
+                String line;
+                while( (line = buffReader.readLine()) != null){
+                    data = data + line;
+                }
+
+                if(!data.isEmpty()){
+                    jsonFile = new JSONObject(data);
+                    //If data are successfully fetched form file, update the preview with the new camera params.
+                    updatePreview();
+                }
+            } catch (MalformedURLException e) {
+                Log.e(TAG, "MalformedURLException thrown when retrieving JSON file with camera params");
+                //throw new RuntimeException(e);
+            } catch (JSONException e) {
+                Log.e(TAG, "MalformedURLException thrown when retrieving JSON file with camera params");
+                //throw new RuntimeException(e);
+            } catch (IOException e) {
+                Log.e(TAG, "MalformedURLException thrown when retrieving JSON file with camera params");
+                //throw new RuntimeException(e);
+            }
+            finally {
+                MainActivity.this.displayCameraParams(jsonFile);
+            }
+        }
+    }
+}
+
