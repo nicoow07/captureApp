@@ -10,7 +10,10 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.ImageFormat;
+import android.graphics.Matrix;
 import android.graphics.SurfaceTexture;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
@@ -44,6 +47,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -57,6 +61,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 
 public class MainActivity extends Activity {
     public static final String CAMERA_SHUTTER_SPEED = "";// matches with 1/4000
@@ -69,6 +74,9 @@ public class MainActivity extends Activity {
     private TextView mFocusTextView;
     private TextView mIsoTextView;
     private TextView mWbBalanceTextView;
+    private TextView mcaptureRateTextView;
+    private TextView moutputSizeTextView;
+    private TextView moutputRotationTextView;
     private TextureView mTextureView;
     private ArrayMap<String, String> mCurrentCameraParamsMap;
     //===CAMERA variables====
@@ -98,6 +106,9 @@ public class MainActivity extends Activity {
         mFocusTextView = (TextView) findViewById(R.id.focusTextView);
         mIsoTextView = (TextView) findViewById(R.id.isoTextView);
         mWbBalanceTextView = (TextView) findViewById(R.id.wbBalanceTextView);
+        mcaptureRateTextView = (TextView) findViewById(R.id.captureRateTextView);
+        moutputSizeTextView = (TextView) findViewById(R.id.outputSizeTextView);
+        moutputRotationTextView = (TextView) findViewById(R.id.outputRotationTextView);
         mTextureView = (TextureView) findViewById(R.id.textureView);
         //Create the surface listener which will trigger openCamera() when the surface is ready to be used
         mTextureView.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
@@ -146,12 +157,8 @@ public class MainActivity extends Activity {
         mCameraOpenCallback = new CameraDevice.StateCallback() {
             @Override
             public void onOpened(CameraDevice camera) {
-                Log.e(TAG, "on camera opened");
+                Log.i(TAG, "on camera opened");
                 mCameraDevice = camera;
-                //Start preview
-                startPreview();
-                //Set capture params
-                setupCameraShotRequest();
             }
 
             @Override
@@ -168,9 +175,6 @@ public class MainActivity extends Activity {
                 mCameraDevice = null;
             }
         };
-
-        //Retrieve automatically the JSON FILE with camera settings
-        new fetchCameraParams().start();
 
         try {
             //Initialize Camera manager, once and for all
@@ -205,11 +209,8 @@ public class MainActivity extends Activity {
         //If camera supports manual sensor, open it
         if (camManualParamSettingAvailable) {
             Log.i("MANUAL SENSOR", "SUPPORTED");
-            openCamera();
         } else {
             Log.i("MANUAL SENSOR", "NOT SUPPORTED");
-            //TO DELETE WHEN GOT FIFI'S PHONE
-            //openCamera();
         }
 
         //If camera supports manual sensor, set camera params with fetched params from server.
@@ -242,18 +243,6 @@ public class MainActivity extends Activity {
     // Function called by class fetchCameraParams when the data are retrieved from server
     public void displayCameraParams(JSONObject jsonObj) {
         Log.i("FETCHED CAMERA PARAMS", jsonObj.toString());
-        //Extract data from JSON to array map
-        try {
-            mCurrentCameraParamsMap.put("shutter_speed", jsonObj.getString("shutter_speed"));
-            mCurrentCameraParamsMap.put("focus", jsonObj.getString("focus"));
-            mCurrentCameraParamsMap.put("iso", jsonObj.getString("iso"));
-            mCurrentCameraParamsMap.put("wb_balance", jsonObj.getString("wb_balance"));
-            mCurrentCameraParamsMap.put("capture_per_sec", jsonObj.getString("capture_per_sec"));
-            mCurrentCameraParamsMap.put("output_size", jsonObj.getString("output_size"));
-            mCurrentCameraParamsMap.put("output_rotation", jsonObj.getString("output_rotation"));
-        } catch (JSONException e) {
-            throw new RuntimeException(e);
-        }
 
         runOnUiThread(new Runnable() {
             @Override
@@ -262,6 +251,9 @@ public class MainActivity extends Activity {
                 mFocusTextView.setText("Focus: " + mCurrentCameraParamsMap.get("focus"));
                 mIsoTextView.setText("ISO: " + mCurrentCameraParamsMap.get("iso"));
                 mWbBalanceTextView.setText("W&B balance: " + mCurrentCameraParamsMap.get("wb_balance"));
+                mcaptureRateTextView.setText("Capture / sec: " + mCurrentCameraParamsMap.get("capture_per_sec"));
+                moutputSizeTextView.setText("Capture format: " + mCurrentCameraParamsMap.get("output_size"));
+                moutputRotationTextView.setText("Image rotation: " + mCurrentCameraParamsMap.get("output_rotation"));
             }
         });
 
@@ -361,7 +353,7 @@ public class MainActivity extends Activity {
             @Override
             public void onImageAvailable(ImageReader imageReader) {
                 Log.i(TAG, "IMAGE AVAILABLE");
-                // TODO SAVE IMAGE TO FILE
+                // TODO Rotate image
                 //Retrieve the image taken from the shot. Get the byte[] associated to it in order to store the image
                 Image capture = imageReader.acquireLatestImage();
                 Image.Plane[] capturePlane = capture.getPlanes();
@@ -375,13 +367,23 @@ public class MainActivity extends Activity {
                 String imgFileName = String.valueOf(Calendar.getInstance().getTimeInMillis()) + "_shot.jpg";
                 File file = new File(path, imgFileName);
 
+                //Rotate the image
+                Bitmap bitmapShot = BitmapFactory.decodeByteArray(captureBytes, 0, captureBytes.length);
+                Matrix m = new Matrix();
+                m.postRotate(Integer.parseInt(Objects.requireNonNull(mCurrentCameraParamsMap.get("output_rotation"))));
+                bitmapShot = Bitmap.createBitmap(bitmapShot, 0, 0, bitmapShot.getWidth(), bitmapShot.getHeight(), m, true);
+
+                ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                bitmapShot.compress(Bitmap.CompressFormat.JPEG, 100, bos);
+                byte[] rotatedCaptureBytes = bos.toByteArray();
+
                 try {
                     // Make sure the Pictures directory exists.
                     path.mkdirs();
 
                     //Write the capture byte[] into the file
                     OutputStream os = new FileOutputStream(file);
-                    os.write(captureBytes);
+                    os.write(rotatedCaptureBytes);
                     os.close();
                     capture.close();
 
@@ -467,6 +469,10 @@ public class MainActivity extends Activity {
 
     public void setupCameraShotRequest(){
         Log.i(TAG,"setupCameraShotRequest");
+        if(mCameraDevice == null){
+            Log.e(TAG, "mCameraDevice is NULL");
+            return;
+        }
         //Create a capture request for shots taking
         try {
             mShotCaptureBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
@@ -508,8 +514,8 @@ public class MainActivity extends Activity {
     //Class to retrieve JSON file with camera parameters from remote server to ease config without rebuilding the app, and without building UI
     //Whenever the JSON file is retrieved from the server, the preview is updated with the new parameters. updatePreview() is called.
     public class fetchCameraParams extends Thread{
-        //private static final String fileURLStr = "http://192.168.0.105:8080/camera_parameters.json";// Home IP
-        private static final String fileURLStr = "http://192.168.8.103:8080/camera_parameters.json";// Work IP
+        private static final String fileURLStr = "http://192.168.0.105:8080/camera_parameters.json";// Home IP
+        //private static final String fileURLStr = "http://192.168.8.103:8080/camera_parameters.json";// Work IP
         String data = "";
         JSONObject jsonFile = null;
 
@@ -537,8 +543,37 @@ public class MainActivity extends Activity {
 
                 if(!data.isEmpty()){
                     jsonFile = new JSONObject(data);
+
+                    //Extract data from JSON to array map
+                    try {
+                        mCurrentCameraParamsMap.put("shutter_speed", jsonFile.getString("shutter_speed"));
+                        mCurrentCameraParamsMap.put("focus", jsonFile.getString("focus"));
+                        mCurrentCameraParamsMap.put("iso", jsonFile.getString("iso"));
+                        mCurrentCameraParamsMap.put("wb_balance", jsonFile.getString("wb_balance"));
+                        mCurrentCameraParamsMap.put("capture_per_sec", jsonFile.getString("capture_per_sec"));
+                        mCurrentCameraParamsMap.put("output_size", jsonFile.getString("output_size"));
+                        mCurrentCameraParamsMap.put("output_rotation", jsonFile.getString("output_rotation"));
+                    } catch (JSONException e) {
+                        throw new RuntimeException(e);
+                    }
+
+                    //This is purely random. If startpreview (and createCaptureSession) is not called from UI thread, it throw error "IllegalArgumentException: No handler given, and current thread has no looper!"
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            //Start preview
+                            startPreview();
+                            //Set capture params
+                            setupCameraShotRequest();
+                        }
+                    });
+
+
                     //If data are successfully fetched form file, update the preview with the new camera params.
-                    updatePreview();
+                    //updatePreview();
+                }
+                else{
+                    Log.e(TAG, "JSON FILE IS EMPTY");
                 }
             } catch (MalformedURLException e) {
                 Log.e(TAG, "MalformedURLException thrown when retrieving JSON file with camera params");
