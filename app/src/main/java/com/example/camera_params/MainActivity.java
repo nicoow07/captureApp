@@ -19,8 +19,16 @@ import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CameraMetadata;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.params.OutputConfiguration;
+import android.hardware.camera2.params.SessionConfiguration;
 import android.hardware.camera2.params.StreamConfigurationMap;
+import android.icu.util.Calendar;
+import android.media.Image;
+import android.media.ImageReader;
+import android.media.MediaScannerConnection;
+import android.net.Uri;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.ArrayMap;
@@ -36,13 +44,19 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 public class MainActivity extends Activity {
     public static final String CAMERA_SHUTTER_SPEED = "";// matches with 1/4000
@@ -69,8 +83,8 @@ public class MainActivity extends Activity {
     private CameraCaptureSession mPreviewSession;
     //Capture
     private CaptureRequest.Builder mShotCaptureBuilder;
-    private CameraCaptureSession mShotSession;
-    private Tex
+    private ImageReader mImageReader;
+
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -132,22 +146,26 @@ public class MainActivity extends Activity {
         mCameraOpenCallback = new CameraDevice.StateCallback() {
             @Override
             public void onOpened(CameraDevice camera) {
-                Log.e(TAG, "onOpened");
+                Log.e(TAG, "on camera opened");
                 mCameraDevice = camera;
                 //Start preview
                 startPreview();
                 //Set capture params
-                setCameraShotRequest();
+                setupCameraShotRequest();
             }
 
             @Override
             public void onDisconnected(CameraDevice camera) {
                 Log.e(TAG, "onDisconnected");
+                camera.close();
+                mCameraDevice = null;
             }
 
             @Override
             public void onError(CameraDevice camera, int error) {
                 Log.e(TAG, "onError");
+                camera.close();
+                mCameraDevice = null;
             }
         };
 
@@ -155,7 +173,7 @@ public class MainActivity extends Activity {
         new fetchCameraParams().start();
 
         try {
-            //Initialize Camera manager, once adn for all
+            //Initialize Camera manager, once and for all
             mCamManager = (CameraManager) this.getSystemService(Context.CAMERA_SERVICE);
 
             //Get the camera ID for the back (not selfie) camera
@@ -231,6 +249,8 @@ public class MainActivity extends Activity {
             mCurrentCameraParamsMap.put("iso", jsonObj.getString("iso"));
             mCurrentCameraParamsMap.put("wb_balance", jsonObj.getString("wb_balance"));
             mCurrentCameraParamsMap.put("capture_per_sec", jsonObj.getString("capture_per_sec"));
+            mCurrentCameraParamsMap.put("output_size", jsonObj.getString("output_size"));
+            mCurrentCameraParamsMap.put("output_rotation", jsonObj.getString("output_rotation"));
         } catch (JSONException e) {
             throw new RuntimeException(e);
         }
@@ -320,9 +340,66 @@ public class MainActivity extends Activity {
             return;
         }
 
-        //Initialise texture & surface
+        //Initialise texture & surface for preview
         texture.setDefaultBufferSize(mPreviewSize.getWidth(), mPreviewSize.getHeight());
-        Surface surface = new Surface(texture);
+        Surface previewSurface = new Surface(texture);
+
+        //Initialize Image reader to handle shot captures
+        //Get the output size
+        String outpuSizeStr = mCurrentCameraParamsMap.get("output_size");
+        Size outputCaptureSize = Size.parseSize(outpuSizeStr);
+        Log.i(TAG, "Output size: " + outpuSizeStr);
+        mImageReader = ImageReader.newInstance(outputCaptureSize.getWidth(), outputCaptureSize.getHeight(), ImageFormat.JPEG, /*maxImages*/2);
+
+        //Set the saving image to file process when an image is available in the imgReader (when a picture has been shot)
+        //Create a thread to send capture request in background.
+        HandlerThread thread = new HandlerThread("ShotCapture");
+        thread.start();
+        Handler backgroundHandler = new Handler(thread.getLooper());
+        //Create the listener to be called when an image is available in the imageReader
+        ImageReader.OnImageAvailableListener saveImageToFileListener = new ImageReader.OnImageAvailableListener() {
+            @Override
+            public void onImageAvailable(ImageReader imageReader) {
+                Log.i(TAG, "IMAGE AVAILABLE");
+                // TODO SAVE IMAGE TO FILE
+                //Retrieve the image taken from the shot. Get the byte[] associated to it in order to store the image
+                Image capture = imageReader.acquireLatestImage();
+                Image.Plane[] capturePlane = capture.getPlanes();
+                //Let's try first by storing only the [0] Plane
+                ByteBuffer captureBuffer = capturePlane[0].getBuffer();
+                byte[] captureBytes = new byte[captureBuffer.remaining()];
+                captureBuffer.get(captureBytes);
+
+                //Create the file to save the image to.
+                File path = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES);
+                String imgFileName = String.valueOf(Calendar.getInstance().getTimeInMillis()) + "_shot.jpg";
+                File file = new File(path, imgFileName);
+
+                try {
+                    // Make sure the Pictures directory exists.
+                    path.mkdirs();
+
+                    //Write the capture byte[] into the file
+                    OutputStream os = new FileOutputStream(file);
+                    os.write(captureBytes);
+                    os.close();
+                    capture.close();
+
+                    // Tell the media scanner about the new file so that it is immediately available to the user.
+                    MediaScannerConnection.scanFile(getApplicationContext(), new String[] { file.toString() }, null, new MediaScannerConnection.OnScanCompletedListener() {
+                                public void onScanCompleted(String path, Uri uri) {
+                                    Log.i("ExternalStorage", "Scanned " + path + ":");
+                                    Log.i("ExternalStorage", "-> uri=" + uri);
+                                }
+                            });
+                } catch (IOException e) {
+                    // Unable to create file, likely because external storage is not currently mounted.
+                    Log.w("ExternalStorage", "Error writing " + file, e);
+                }
+            }
+        };
+        mImageReader.setOnImageAvailableListener(saveImageToFileListener, backgroundHandler);
+
 
         //Get a capture request
         try {
@@ -331,15 +408,17 @@ public class MainActivity extends Activity {
             e.printStackTrace();
         }
         //Connect the camera preview to the surface
-        mPreviewCaptureBuilder.addTarget(surface);
+        mPreviewCaptureBuilder.addTarget(previewSurface);
 
         try {
+            //Creating capture session with both textureview and imageReader as output
+            List targetOutputs = Arrays.asList(previewSurface, mImageReader.getSurface());
             //Create a capture session for the preview. (it holds the parameters we want to set for the camera)
-            mCameraDevice.createCaptureSession(Arrays.asList(surface), new CameraCaptureSession.StateCallback() {
+            mCameraDevice.createCaptureSession(targetOutputs, new CameraCaptureSession.StateCallback() {
 
                 @Override
                 public void onConfigured(CameraCaptureSession session) {
-                    Log.i(TAG, "CAPTURE SESSION READY");
+                    Log.i(TAG, "PREVIEW CAPTURE SESSION READY");
                     mPreviewSession = session;
                     updatePreview();
                 }
@@ -386,7 +465,9 @@ public class MainActivity extends Activity {
         }
     }
 
-    public void setCameraShotRequest(){
+    public void setupCameraShotRequest(){
+        Log.i(TAG,"setupCameraShotRequest");
+        //Create a capture request for shots taking
         try {
             mShotCaptureBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
         } catch (CameraAccessException e) {
@@ -395,46 +476,32 @@ public class MainActivity extends Activity {
         }
 
         //Connect the camera preview to the surface
-        mPreviewCaptureBuilder.addTarget(surface);
+        mShotCaptureBuilder.addTarget(mImageReader.getSurface());
 
-        try {
-            //Create a capture session for the preview. (it holds the parameters we want to set for the camera)
-            mCameraDevice.createCaptureSession(Arrays.asList(surface), new CameraCaptureSession.StateCallback() {
-
-                @Override
-                public void onConfigured(CameraCaptureSession session) {
-                    Log.i(TAG, "CAPTURE SESSION READY");
-                    mPreviewSession = session;
-                    updatePreview();
-                }
-
-                @Override
-                public void onConfigureFailed(CameraCaptureSession session) {
-                    Log.e(TAG,"onConfiguration failed.");
-                }
-            }, null);
-        } catch (CameraAccessException e) {
-            e.printStackTrace();
-        }
     }
 
     public void takeShot(){
         Log.i(TAG, "takeShot()");
-        if(mCameraDevice == null | mPreviewCaptureBuilder == null) {
+        if(mCameraDevice == null | mShotCaptureBuilder == null) {
             Log.e(TAG, "takeShot error: camera is null or capture builder");
             return;
         }
-
+/*
         mShotCaptureBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH);
         mShotCaptureBuilder.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE);
         mShotCaptureBuilder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, CaptureRequest.CONTROL_AE_STATE_FLASH_REQUIRED);
         mShotCaptureBuilder.set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_CANCEL);
-        mShotCaptureBuilder.addTarget(mCaptureBuffer.getSurface());
+       */
+
+        //Create a thread to send capture request in loop.
+        HandlerThread thread = new HandlerThread("ShotCapture");
+        thread.start();
+        Handler backgroundHandler = new Handler(thread.getLooper());
 
         try {
-            mShotSession.capture(mShotCaptureBuilder.build(), null, null);
+            mPreviewSession.capture(mShotCaptureBuilder.build(), null, backgroundHandler);
         } catch (CameraAccessException e) {
-            throw new RuntimeException(e);
+            e.printStackTrace();
         }
     }
 
@@ -456,6 +523,8 @@ public class MainActivity extends Activity {
                 jsonFile.put("iso", "?");
                 jsonFile.put("wb_balance", "?");
                 jsonFile.put("capture_per_sec", "0");
+                jsonFile.put("output_size", "720x480");
+                jsonFile.put("output_rotation", "90");
 
                 URL url = new URL(fileURLStr);
                 HttpURLConnection httpUrlCnx = (HttpURLConnection) url.openConnection();
