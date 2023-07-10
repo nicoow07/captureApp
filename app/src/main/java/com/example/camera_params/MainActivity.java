@@ -15,6 +15,7 @@ import android.graphics.BitmapFactory;
 import android.graphics.ImageFormat;
 import android.graphics.Matrix;
 import android.graphics.SurfaceTexture;
+import android.hardware.Camera;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
@@ -22,7 +23,10 @@ import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CameraMetadata;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.CaptureResult;
+import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.OutputConfiguration;
+import android.hardware.camera2.params.RggbChannelVector;
 import android.hardware.camera2.params.SessionConfiguration;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.icu.util.Calendar;
@@ -36,6 +40,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.ArrayMap;
 import android.util.Log;
+import android.util.Range;
 import android.util.Size;
 import android.view.Surface;
 import android.view.TextureView;
@@ -212,10 +217,6 @@ public class MainActivity extends Activity {
         } else {
             Log.i("MANUAL SENSOR", "NOT SUPPORTED");
         }
-
-        //If camera supports manual sensor, set camera params with fetched params from server.
-
-
     }
 
     //Print in log.i the output sizes supported under JPG format of the camera ID passed in argument
@@ -248,7 +249,7 @@ public class MainActivity extends Activity {
             @Override
             public void run() {
                 mShutterSpeedTextView.setText("Shutter speed: " + "1/" + mCurrentCameraParamsMap.get("shutter_speed"));
-                mFocusTextView.setText("Focus: " + mCurrentCameraParamsMap.get("focus"));
+                mFocusTextView.setText("Focus: " + mCurrentCameraParamsMap.get("focus_distance"));
                 mIsoTextView.setText("ISO: " + mCurrentCameraParamsMap.get("iso"));
                 mWbBalanceTextView.setText("W&B balance: " + mCurrentCameraParamsMap.get("wb_balance"));
                 mcaptureRateTextView.setText("Capture / sec: " + mCurrentCameraParamsMap.get("capture_per_sec"));
@@ -445,14 +446,33 @@ public class MainActivity extends Activity {
             Log.i(TAG, "mPreviewCaptureBuilder not ready yet to updatePreview");
             return;
         }
+        if(mCurrentCameraParamsMap.get("focus_distance") == null || mCurrentCameraParamsMap.get("shutter_speed") == null || mCurrentCameraParamsMap.get("iso") == null){
+            Log.i(TAG, "mCurrentCameraParamsMap has some null fields in updatePreview().");
+            return;
+        }
 
         //Enable auto-exposure + auto w-b balance + auto focus
         //mPreviewCaptureBuilder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_OFF);
-        //Disable auto Exposure
-        mPreviewCaptureBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH);
-        //Set ISO level according to the camera params stored in mCurrentCameraParamsMap
-        //Log.i(TAG, "Setting ISO level to: " + mCurrentCameraParamsMap.get("iso"));
-        //mPreviewCaptureBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, Integer.valueOf(mCurrentCameraParamsMap.get("iso")));
+        //Set manual focus
+        mPreviewCaptureBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE);
+        mPreviewCaptureBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
+        Float focusDistance = Float.parseFloat(mCurrentCameraParamsMap.get("focus_distance"));
+        mPreviewCaptureBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE, focusDistance);
+
+        //Set Manual W/B balance. Recommended to do before setting AE off
+        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF);//Turn off auto white balance
+        mShotCaptureBuilder.set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX);//Turn off auto white balance
+        RggbChannelVector gain = colorTemperature(Integer.parseInt(mCurrentCameraParamsMap.get("wb_balance")));
+        mShotCaptureBuilder.set(CaptureRequest.COLOR_CORRECTION_GAINS, gain);
+
+        //Set exposure time
+        mPreviewCaptureBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);//Required to set manual exposure time
+        Long exposureTime = Long.parseLong(mCurrentCameraParamsMap.get("shutter_speed"));
+        mPreviewCaptureBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureTime);
+
+        //Set ISO level of the preview according to the camera params stored in mCurrentCameraParamsMap
+        Integer iso = Integer.parseInt(mCurrentCameraParamsMap.get("iso"));
+        mPreviewCaptureBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, iso);
 
 
         //Create a thread to send capture request in loop.
@@ -484,6 +504,19 @@ public class MainActivity extends Activity {
         //Connect the camera preview to the surface
         mShotCaptureBuilder.addTarget(mImageReader.getSurface());
 
+        //Get the parameters value supported by the camera
+        Float minFocusDistance = mCamCharacteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
+        Log.i("MIN FOCUS DISTANCE: ", minFocusDistance.toString());
+        Range<Long> exposureRange = mCamCharacteristics.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
+        Log.i("EXPOSURE RANGE: ", exposureRange.toString());
+        Range<Integer> sensitivityRange = mCamCharacteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
+        Log.i("ISO RANGE: ", sensitivityRange.toString());
+
+    }
+
+    //Return the object used as parameter for COLOR_CORRECTION_GAINS
+    public static RggbChannelVector colorTemperature(int whiteBalance) {
+        return new RggbChannelVector(0.635f + (0.0208333f * whiteBalance), 1.0f, 1.0f, 3.7420394f + (-0.0287829f * whiteBalance));
     }
 
     public void takeShot(){
@@ -492,12 +525,36 @@ public class MainActivity extends Activity {
             Log.e(TAG, "takeShot error: camera is null or capture builder");
             return;
         }
-/*
-        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH);
-        mShotCaptureBuilder.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE);
+        if(mCurrentCameraParamsMap.get("focus_distance") == null || mCurrentCameraParamsMap.get("shutter_speed") == null || mCurrentCameraParamsMap.get("iso") == null){
+            Log.i(TAG, "mCurrentCameraParamsMap has some null fields in takeShot().");
+            return;
+        }
+
+        //Set Focus
+        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE);
+        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
+        Float focusDistance = Float.parseFloat(mCurrentCameraParamsMap.get("focus_distance"));
+        mShotCaptureBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE, focusDistance);
+
+        //Set Manual W/B balance. Recommended to do before setting AE off
+        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF);//Turn off auto white balance
+        mShotCaptureBuilder.set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX);//Turn off auto white balance
+        RggbChannelVector gain = colorTemperature(Integer.parseInt(mCurrentCameraParamsMap.get("wb_balance")));
+        mShotCaptureBuilder.set(CaptureRequest.COLOR_CORRECTION_GAINS, gain);
+
+        //Set Exposure time
+        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);//Required to set manual exposure time
+        Long exposureTime = Long.parseLong(mCurrentCameraParamsMap.get("shutter_speed"));
+        mShotCaptureBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureTime);
+
+        //Set ISO sensitivity
+        Integer iso = Integer.parseInt(mCurrentCameraParamsMap.get("iso"));
+        mPreviewCaptureBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, iso);
+
+        /*mShotCaptureBuilder.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE);
         mShotCaptureBuilder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, CaptureRequest.CONTROL_AE_STATE_FLASH_REQUIRED);
-        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_CANCEL);
-       */
+        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_CANCEL);*/
+
 
         //Create a thread to send capture request in loop.
         HandlerThread thread = new HandlerThread("ShotCapture");
@@ -505,7 +562,18 @@ public class MainActivity extends Activity {
         Handler backgroundHandler = new Handler(thread.getLooper());
 
         try {
-            mPreviewSession.capture(mShotCaptureBuilder.build(), null, backgroundHandler);
+            CameraCaptureSession.CaptureCallback captureCallback = new CameraCaptureSession.CaptureCallback() {
+                @Override
+                public void onCaptureCompleted(@NonNull CameraCaptureSession session, @NonNull CaptureRequest request, @NonNull TotalCaptureResult result) {
+                    super.onCaptureCompleted(session, request, result);
+                    Long effectiveExposureTime = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
+                    Log.i("EFFECTIVE EXP TIME", String.valueOf(effectiveExposureTime));
+
+                    Integer effectiveISO = result.get(CaptureResult.SENSOR_SENSITIVITY);
+                    Log.i("EFFECTIVE ISO", String.valueOf(effectiveISO));
+                }
+            };
+            mPreviewSession.capture(mShotCaptureBuilder.build(), captureCallback, backgroundHandler);
         } catch (CameraAccessException e) {
             e.printStackTrace();
         }
@@ -514,8 +582,8 @@ public class MainActivity extends Activity {
     //Class to retrieve JSON file with camera parameters from remote server to ease config without rebuilding the app, and without building UI
     //Whenever the JSON file is retrieved from the server, the preview is updated with the new parameters. updatePreview() is called.
     public class fetchCameraParams extends Thread{
-        private static final String fileURLStr = "http://192.168.0.105:8080/camera_parameters.json";// Home IP
-        //private static final String fileURLStr = "http://192.168.8.103:8080/camera_parameters.json";// Work IP
+        //private static final String fileURLStr = "http://192.168.0.105:8080/camera_parameters.json";// Home IP
+        private static final String fileURLStr = "http://192.168.8.79:8080/camera_parameters.json";// Work IP
         String data = "";
         JSONObject jsonFile = null;
 
@@ -525,7 +593,7 @@ public class MainActivity extends Activity {
                 //Init jsonFile with dummy values
                 jsonFile = new JSONObject();
                 jsonFile.put("shutter_speed", "1/?");
-                jsonFile.put("focus", "?");
+                jsonFile.put("focus_distance", "?");
                 jsonFile.put("iso", "?");
                 jsonFile.put("wb_balance", "?");
                 jsonFile.put("capture_per_sec", "0");
@@ -547,7 +615,7 @@ public class MainActivity extends Activity {
                     //Extract data from JSON to array map
                     try {
                         mCurrentCameraParamsMap.put("shutter_speed", jsonFile.getString("shutter_speed"));
-                        mCurrentCameraParamsMap.put("focus", jsonFile.getString("focus"));
+                        mCurrentCameraParamsMap.put("focus_distance", jsonFile.getString("focus_distance"));
                         mCurrentCameraParamsMap.put("iso", jsonFile.getString("iso"));
                         mCurrentCameraParamsMap.put("wb_balance", jsonFile.getString("wb_balance"));
                         mCurrentCameraParamsMap.put("capture_per_sec", jsonFile.getString("capture_per_sec"));
