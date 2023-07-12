@@ -292,6 +292,14 @@ public class MainActivity extends Activity {
             }
         });
         mCustomRepeatCaptureThread.start();
+
+        //Setup background task to monitor the number of images in the directory, and prune the older ones.
+        Thread storageLevelMonitoringThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+
+            }
+        });
     }
 
     //Print in log.i the output sizes supported under JPG format of the camera ID passed in argument
