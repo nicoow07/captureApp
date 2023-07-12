@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">Camera_params</string>
-    <string name="refresh_button_text">Refresh cam params</string>
+    <string name="refresh_button_text">Refresh params</string>
 </resources>

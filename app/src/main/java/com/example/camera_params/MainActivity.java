@@ -3,6 +3,7 @@ package com.example.camera_params;
 import static androidx.constraintlayout.helper.widget.MotionEffect.TAG;
 
 import androidx.annotation.NonNull;
+import androidx.appcompat.widget.AppCompatToggleButton;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
@@ -15,19 +16,15 @@ import android.graphics.BitmapFactory;
 import android.graphics.ImageFormat;
 import android.graphics.Matrix;
 import android.graphics.SurfaceTexture;
-import android.hardware.Camera;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
-import android.hardware.camera2.CameraMetadata;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.TotalCaptureResult;
-import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.params.RggbChannelVector;
-import android.hardware.camera2.params.SessionConfiguration;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.icu.util.Calendar;
 import android.media.Image;
@@ -46,6 +43,7 @@ import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
 import android.widget.Button;
+import android.widget.CompoundButton;
 import android.widget.TextView;
 
 import org.json.JSONException;
@@ -63,7 +61,6 @@ import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
@@ -74,7 +71,7 @@ public class MainActivity extends Activity {
     public static final String CAMERA_FOCUS = "";//
     private static final int CAMERA_REQUEST_CODE = 234;
     private Button mRefreshBtn;
-    private Button mCaptureBtn;
+    private AppCompatToggleButton mCaptureBtn;
     private TextView mShutterSpeedTextView;
     private TextView mFocusTextView;
     private TextView mIsoTextView;
@@ -84,6 +81,7 @@ public class MainActivity extends Activity {
     private TextView moutputRotationTextView;
     private TextureView mTextureView;
     private ArrayMap<String, String> mCurrentCameraParamsMap;
+    private StreamConfigurationMap mStreamConfigMap;
     //===CAMERA variables====
     private CameraManager mCamManager;
     private CameraCharacteristics mCamCharacteristics;
@@ -93,10 +91,11 @@ public class MainActivity extends Activity {
     private CameraDevice mCameraDevice;
     // Preview
     private CaptureRequest.Builder mPreviewCaptureBuilder;
-    private CameraCaptureSession mPreviewSession;
+    private CameraCaptureSession mCaptureSession;
     //Capture
     private CaptureRequest.Builder mShotCaptureBuilder;
     private ImageReader mImageReader;
+    private Thread customRepeatCaptureThread;
 
 
     @Override
@@ -150,11 +149,25 @@ public class MainActivity extends Activity {
         });
 
         //Set capture btn callback
-        mCaptureBtn = (Button) findViewById(R.id.captureBtn);
-        mCaptureBtn.setOnClickListener(new View.OnClickListener() {
+        mCaptureBtn = (AppCompatToggleButton) findViewById(R.id.captureBtn);
+        mCaptureBtn.setEnabled(false);//Disable button until camera parameters have been fetched from file on server
+        mCaptureBtn.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
-            public void onClick(View view) {
-                takeShot();
+            public void onCheckedChanged(CompoundButton compoundButton, boolean b) {
+                //b == True means to start capturing
+                //TODO add repeated capture request
+                Log.i("TOGGLE BUTTON CHANGED", Boolean.toString(b));
+                //takeShot();
+                if(b == true){
+                    startShotRepeatCapture();
+                }else{
+                    stopShotRepeatCapture();
+                    //Start again preview
+                    startPreview();
+                    //Set capture params
+                    setupCameraShotRequest();
+                }
+
             }
         });
 
@@ -217,13 +230,29 @@ public class MainActivity extends Activity {
         } else {
             Log.i("MANUAL SENSOR", "NOT SUPPORTED");
         }
+
+        //Ask runtime storage permission
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_DENIED) {
+            ActivityCompat.requestPermissions(MainActivity.this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 0);
+            Log.i("----Permissions---- ", "Requesting camera permission at run time");
+        }
+
+        //Create thread for repeat captures
+        customRepeatCaptureThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+
+            }
+        });
     }
 
     //Print in log.i the output sizes supported under JPG format of the camera ID passed in argument
     public void logOutputSizes() {
-        StreamConfigurationMap configs = mCamCharacteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
         //Display output sizes (under jpg format)
-        Size[] sizes = configs.getOutputSizes(ImageFormat.JPEG);
+        if(mStreamConfigMap == null){
+            mStreamConfigMap = mCamCharacteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+        }
+        Size[] sizes = mStreamConfigMap.getOutputSizes(ImageFormat.JPEG);
         if (sizes == null) {
             Log.i("---Picture sizes---", "JPG format not supported");
         } else {
@@ -300,7 +329,10 @@ public class MainActivity extends Activity {
     public void openCamera() {
         Log.i(TAG, "Opening camera...");
         try {
-            StreamConfigurationMap map = mCamCharacteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            if(mStreamConfigMap == null){
+                mStreamConfigMap = mCamCharacteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            }
+
             Log.i(TAG, "Selected preview size is: " + mPreviewSize.toString());
 
             //Runtime camera permission request
@@ -320,6 +352,7 @@ public class MainActivity extends Activity {
         //Check cameraDevice object is working
         if(mCameraDevice == null){
             Log.e(TAG, "startPreview fail, Camera Device == null");
+            openCamera();
             return;
         } else if (!mTextureView.isAvailable()) {
             Log.e(TAG, "startPreview fail, Texture view is not available");
@@ -346,7 +379,7 @@ public class MainActivity extends Activity {
 
         //Set the saving image to file process when an image is available in the imgReader (when a picture has been shot)
         //Create a thread to send capture request in background.
-        HandlerThread thread = new HandlerThread("ShotCapture");
+        HandlerThread thread = new HandlerThread("FileSaving");
         thread.start();
         Handler backgroundHandler = new Handler(thread.getLooper());
         //Create the listener to be called when an image is available in the imageReader
@@ -354,9 +387,10 @@ public class MainActivity extends Activity {
             @Override
             public void onImageAvailable(ImageReader imageReader) {
                 Log.i(TAG, "IMAGE AVAILABLE");
-                // TODO Rotate image
+
                 //Retrieve the image taken from the shot. Get the byte[] associated to it in order to store the image
                 Image capture = imageReader.acquireLatestImage();
+                if(capture == null){Log.e(TAG, "capture is null in onImageAvailable().");return;}
                 Image.Plane[] capturePlane = capture.getPlanes();
                 //Let's try first by storing only the [0] Plane
                 ByteBuffer captureBuffer = capturePlane[0].getBuffer();
@@ -370,6 +404,7 @@ public class MainActivity extends Activity {
 
                 //Rotate the image
                 Bitmap bitmapShot = BitmapFactory.decodeByteArray(captureBytes, 0, captureBytes.length);
+                if(bitmapShot == null){Log.e(TAG, "bitmapShot is null in onImageAvailable()."); return;}
                 Matrix m = new Matrix();
                 m.postRotate(Integer.parseInt(Objects.requireNonNull(mCurrentCameraParamsMap.get("output_rotation"))));
                 bitmapShot = Bitmap.createBitmap(bitmapShot, 0, 0, bitmapShot.getWidth(), bitmapShot.getHeight(), m, true);
@@ -378,6 +413,7 @@ public class MainActivity extends Activity {
                 bitmapShot.compress(Bitmap.CompressFormat.JPEG, 100, bos);
                 byte[] rotatedCaptureBytes = bos.toByteArray();
 
+                capture.close();
                 try {
                     // Make sure the Pictures directory exists.
                     path.mkdirs();
@@ -386,7 +422,6 @@ public class MainActivity extends Activity {
                     OutputStream os = new FileOutputStream(file);
                     os.write(rotatedCaptureBytes);
                     os.close();
-                    capture.close();
 
                     // Tell the media scanner about the new file so that it is immediately available to the user.
                     MediaScannerConnection.scanFile(getApplicationContext(), new String[] { file.toString() }, null, new MediaScannerConnection.OnScanCompletedListener() {
@@ -399,6 +434,7 @@ public class MainActivity extends Activity {
                     // Unable to create file, likely because external storage is not currently mounted.
                     Log.w("ExternalStorage", "Error writing " + file, e);
                 }
+                //capture.close();
             }
         };
         mImageReader.setOnImageAvailableListener(saveImageToFileListener, backgroundHandler);
@@ -422,7 +458,7 @@ public class MainActivity extends Activity {
                 @Override
                 public void onConfigured(CameraCaptureSession session) {
                     Log.i(TAG, "PREVIEW CAPTURE SESSION READY");
-                    mPreviewSession = session;
+                    mCaptureSession = session;
                     updatePreview();
                 }
 
@@ -460,10 +496,10 @@ public class MainActivity extends Activity {
         mPreviewCaptureBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE, focusDistance);
 
         //Set Manual W/B balance. Recommended to do before setting AE off
-        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF);//Turn off auto white balance
-        mShotCaptureBuilder.set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX);//Turn off auto white balance
+        mPreviewCaptureBuilder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF);//Turn off auto white balance
+        mPreviewCaptureBuilder.set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX);//Turn off auto white balance
         RggbChannelVector gain = colorTemperature(Integer.parseInt(mCurrentCameraParamsMap.get("wb_balance")));
-        mShotCaptureBuilder.set(CaptureRequest.COLOR_CORRECTION_GAINS, gain);
+        mPreviewCaptureBuilder.set(CaptureRequest.COLOR_CORRECTION_GAINS, gain);
 
         //Set exposure time
         mPreviewCaptureBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);//Required to set manual exposure time
@@ -481,7 +517,7 @@ public class MainActivity extends Activity {
         Handler backgroundHandler = new Handler(thread.getLooper());
 
         try {
-            mPreviewSession.setRepeatingRequest(mPreviewCaptureBuilder.build(), null, backgroundHandler);
+            mCaptureSession.setRepeatingRequest(mPreviewCaptureBuilder.build(), null, backgroundHandler);
         } catch (CameraAccessException e) {
             e.printStackTrace();
         }
@@ -501,25 +537,51 @@ public class MainActivity extends Activity {
             throw new RuntimeException(e);
         }
 
-        //Connect the camera preview to the surface
+        //Connect the camera preview to the surface + image reader to save the shots
         mShotCaptureBuilder.addTarget(mImageReader.getSurface());
 
+        SurfaceTexture texture = mTextureView.getSurfaceTexture();
+        if(null == texture) {
+            Log.e(TAG,"texture is null, return");
+            return;
+        }
+        //Initialise texture & surface for preview
+        texture.setDefaultBufferSize(mPreviewSize.getWidth(), mPreviewSize.getHeight());
+        Surface previewSurface = new Surface(texture);
+        mShotCaptureBuilder.addTarget(previewSurface);
+
         //Get the parameters value supported by the camera
+        //Supported output formats (JPEG...)
+        int[] formats = mStreamConfigMap.getOutputFormats();
+        Log.i("AVAILABLE IMG FORMATS: ", Arrays.toString(formats));
+        //TODO CHECK IF STORAGE ISSUE COMES FROM IMG FORMAT
+        //Focus distance
         Float minFocusDistance = mCamCharacteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
         Log.i("MIN FOCUS DISTANCE: ", minFocusDistance.toString());
+        //Exposure range
         Range<Long> exposureRange = mCamCharacteristics.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
         Log.i("EXPOSURE RANGE: ", exposureRange.toString());
+        //ISO range
         Range<Integer> sensitivityRange = mCamCharacteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
         Log.i("ISO RANGE: ", sensitivityRange.toString());
-
+        //Min frame rate
+        String outpuSizeStr = mCurrentCameraParamsMap.get("output_size");
+        Size outputCaptureSize = Size.parseSize(outpuSizeStr);
+        long minFrameRate = mStreamConfigMap.getOutputMinFrameDuration(ImageFormat.JPEG, outputCaptureSize);
+        Log.i("Min frame duration: ", Long.toString(minFrameRate));
     }
 
-    //Return the object used as parameter for COLOR_CORRECTION_GAINS
-    public static RggbChannelVector colorTemperature(int whiteBalance) {
-        return new RggbChannelVector(0.635f + (0.0208333f * whiteBalance), 1.0f, 1.0f, 3.7420394f + (-0.0287829f * whiteBalance));
+    public void stopShotRepeatCapture(){
+        try {
+            mCaptureSession.stopRepeating();
+            mCaptureSession.abortCaptures();
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
     }
 
-    public void takeShot(){
+    public void startShotRepeatCapture(){
+
         Log.i(TAG, "takeShot()");
         if(mCameraDevice == null | mShotCaptureBuilder == null) {
             Log.e(TAG, "takeShot error: camera is null or capture builder");
@@ -529,6 +591,11 @@ public class MainActivity extends Activity {
             Log.i(TAG, "mCurrentCameraParamsMap has some null fields in takeShot().");
             return;
         }
+
+        Long frameRate = Long.parseLong(mCurrentCameraParamsMap.get("capture_per_sec"));// In nanosec
+        Long frameDuration = 1000000000L / frameRate;
+        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(frameRate.intValue(), frameRate.intValue()));//Makes no sense as AR is OFF, but depending on devices, this allow to set custom frame rates
+
 
         //Set Focus
         mShotCaptureBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE);
@@ -549,12 +616,12 @@ public class MainActivity extends Activity {
 
         //Set ISO sensitivity
         Integer iso = Integer.parseInt(mCurrentCameraParamsMap.get("iso"));
-        mPreviewCaptureBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, iso);
+        mShotCaptureBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, iso);
 
-        /*mShotCaptureBuilder.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE);
-        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, CaptureRequest.CONTROL_AE_STATE_FLASH_REQUIRED);
-        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER, CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_CANCEL);*/
+        //Set frame rate
 
+        Log.i("Frame Duration:", Long.toString(frameDuration));
+        mShotCaptureBuilder.set(CaptureRequest.SENSOR_FRAME_DURATION, frameDuration);
 
         //Create a thread to send capture request in loop.
         HandlerThread thread = new HandlerThread("ShotCapture");
@@ -571,12 +638,21 @@ public class MainActivity extends Activity {
 
                     Integer effectiveISO = result.get(CaptureResult.SENSOR_SENSITIVITY);
                     Log.i("EFFECTIVE ISO", String.valueOf(effectiveISO));
+
+                    Long effectiveFrameDuration = result.get(CaptureResult.SENSOR_FRAME_DURATION);
+                    Log.i("EFFECTIVE FRAME DURATION", String.valueOf(effectiveFrameDuration));
                 }
             };
-            mPreviewSession.capture(mShotCaptureBuilder.build(), captureCallback, backgroundHandler);
+            mCaptureSession.setRepeatingRequest(mShotCaptureBuilder.build(), captureCallback, backgroundHandler);
         } catch (CameraAccessException e) {
             e.printStackTrace();
         }
+    }
+
+    public void startCustomRepeatCapture(){
+
+    }public void stopCustomRepeatCapture(){
+
     }
 
     //Class to retrieve JSON file with camera parameters from remote server to ease config without rebuilding the app, and without building UI
@@ -633,6 +709,9 @@ public class MainActivity extends Activity {
                             startPreview();
                             //Set capture params
                             setupCameraShotRequest();
+
+                            //Enable capture button
+                            mCaptureBtn.setEnabled(true);
                         }
                     });
 
@@ -657,6 +736,11 @@ public class MainActivity extends Activity {
                 MainActivity.this.displayCameraParams(jsonFile);
             }
         }
+    }
+
+    //Return the object used as parameter for COLOR_CORRECTION_GAINS
+    public static RggbChannelVector colorTemperature(int whiteBalance) {
+        return new RggbChannelVector(0.635f + (0.0208333f * whiteBalance), 1.0f, 1.0f, 3.7420394f + (-0.0287829f * whiteBalance));
     }
 }
 
