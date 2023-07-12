@@ -95,7 +95,8 @@ public class MainActivity extends Activity {
     //Capture
     private CaptureRequest.Builder mShotCaptureBuilder;
     private ImageReader mImageReader;
-    private Thread customRepeatCaptureThread;
+    private Thread mCustomRepeatCaptureThread;
+    private Boolean mRepeatCaptureRunning;//True = repeat captures running. False = stop captures.
 
 
     @Override
@@ -157,17 +158,13 @@ public class MainActivity extends Activity {
                 //b == True means to start capturing
                 //TODO add repeated capture request
                 Log.i("TOGGLE BUTTON CHANGED", Boolean.toString(b));
-                //takeShot();
-                if(b == true){
-                    startShotRepeatCapture();
-                }else{
-                    stopShotRepeatCapture();
-                    //Start again preview
-                    startPreview();
-                    //Set capture params
-                    setupCameraShotRequest();
-                }
 
+                if(b == true){
+                    //Start repeat capture thread
+                    startCustomRepeatCapture();
+                }else{
+                    stopCustomRepeatCapture();
+                }
             }
         });
 
@@ -237,13 +234,64 @@ public class MainActivity extends Activity {
             Log.i("----Permissions---- ", "Requesting camera permission at run time");
         }
 
-        //Create thread for repeat captures
-        customRepeatCaptureThread = new Thread(new Runnable() {
+        //Create thread for repeat captures. The thread will run as long as the app is running. The global variable mRepeatCaptureThreadState is read by the thread to manage it's behavior
+        mRepeatCaptureRunning = false;//Initially the captures are not taken
+        mCustomRepeatCaptureThread = new Thread(new Runnable() {
             @Override
             public void run() {
+                int sleepTime = 1000;
+                //Create a thread to send capture request in loop.
+                HandlerThread thread = new HandlerThread("ShotCapture");
+                thread.start();
+                Handler backgroundHandler = new Handler(thread.getLooper());
 
+                CameraCaptureSession.CaptureCallback captureCallback = new CameraCaptureSession.CaptureCallback() {
+                    @Override
+                    public void onCaptureCompleted(@NonNull CameraCaptureSession session, @NonNull CaptureRequest request, @NonNull TotalCaptureResult result) {
+                        super.onCaptureCompleted(session, request, result);
+                        Long effectiveExposureTime = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
+                        Log.i("EFFECTIVE EXP TIME", String.valueOf(effectiveExposureTime));
+
+                        Integer effectiveISO = result.get(CaptureResult.SENSOR_SENSITIVITY);
+                        Log.i("EFFECTIVE ISO", String.valueOf(effectiveISO));
+
+                        Long effectiveFrameDuration = result.get(CaptureResult.SENSOR_FRAME_DURATION);
+                        Log.i("EFFECTIVE FRAME DURATION", String.valueOf(effectiveFrameDuration));
+                    }
+                };
+
+                while(true){
+
+                    if(mRepeatCaptureRunning){
+                        //Update the frameRate
+                        int frameRate = Integer.parseInt(mCurrentCameraParamsMap.get("capture_per_sec"));
+                        sleepTime = 1000 / frameRate;
+
+                        //==========Take capture===========
+                        try {
+                            mCaptureSession.capture(mShotCaptureBuilder.build(), captureCallback, backgroundHandler);
+                        } catch (CameraAccessException e) {
+                            e.printStackTrace();
+                        }
+
+                    }else{
+                        //Sleep 1s before checking again if the state of mRepeatCaptureRunning
+                        try {
+                            Thread.sleep(1000);
+                        } catch (InterruptedException e) {
+                            throw new RuntimeException(e);
+                        }
+                    }
+                    //Sleep the right amount of time to get the expected frame rate
+                    try {
+                        Thread.sleep(sleepTime);
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
             }
         });
+        mCustomRepeatCaptureThread.start();
     }
 
     //Print in log.i the output sizes supported under JPG format of the camera ID passed in argument
@@ -550,11 +598,10 @@ public class MainActivity extends Activity {
         Surface previewSurface = new Surface(texture);
         mShotCaptureBuilder.addTarget(previewSurface);
 
-        //Get the parameters value supported by the camera
+        //Get the parameter values supported by the camera
         //Supported output formats (JPEG...)
         int[] formats = mStreamConfigMap.getOutputFormats();
         Log.i("AVAILABLE IMG FORMATS: ", Arrays.toString(formats));
-        //TODO CHECK IF STORAGE ISSUE COMES FROM IMG FORMAT
         //Focus distance
         Float minFocusDistance = mCamCharacteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
         Log.i("MIN FOCUS DISTANCE: ", minFocusDistance.toString());
@@ -569,6 +616,41 @@ public class MainActivity extends Activity {
         Size outputCaptureSize = Size.parseSize(outpuSizeStr);
         long minFrameRate = mStreamConfigMap.getOutputMinFrameDuration(ImageFormat.JPEG, outputCaptureSize);
         Log.i("Min frame duration: ", Long.toString(minFrameRate));
+
+        //Set all parameters
+        if(mShotCaptureBuilder == null) {
+            Log.e(TAG, "takeShot error: capture builder is null");
+            return;
+        }
+        if(mCurrentCameraParamsMap.get("focus_distance") == null || mCurrentCameraParamsMap.get("shutter_speed") == null || mCurrentCameraParamsMap.get("iso") == null){
+            Log.i(TAG, "mCurrentCameraParamsMap has some null fields in takeShot().");
+            return;
+        }
+        //Set Focus
+        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE);
+        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
+        Float focusDistance = Float.parseFloat(mCurrentCameraParamsMap.get("focus_distance"));
+        mShotCaptureBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE, focusDistance);
+
+        //Set Manual W/B balance. Recommended to do before setting AE off
+        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF);//Turn off auto white balance
+        mShotCaptureBuilder.set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX);//Turn off auto white balance
+        RggbChannelVector gain = colorTemperature(Integer.parseInt(mCurrentCameraParamsMap.get("wb_balance")));
+        mShotCaptureBuilder.set(CaptureRequest.COLOR_CORRECTION_GAINS, gain);
+
+        //Set Exposure time
+        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);//Required to set manual exposure time
+        Long exposureTime = Long.parseLong(mCurrentCameraParamsMap.get("shutter_speed"));
+        mShotCaptureBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureTime);
+
+        //Set ISO sensitivity
+        Integer iso = Integer.parseInt(mCurrentCameraParamsMap.get("iso"));
+        mShotCaptureBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, iso);
+
+        //Print sleep time
+        int frameRate = Integer.parseInt(mCurrentCameraParamsMap.get("capture_per_sec"));
+        int sleepTime = 1000 / frameRate;
+        Log.i("Sleeping time:", Long.toString(sleepTime));
     }
 
     public void stopShotRepeatCapture(){
@@ -650,9 +732,11 @@ public class MainActivity extends Activity {
     }
 
     public void startCustomRepeatCapture(){
+        mRepeatCaptureRunning = true;
+    }
 
-    }public void stopCustomRepeatCapture(){
-
+    public void stopCustomRepeatCapture(){
+        mRepeatCaptureRunning = false;
     }
 
     //Class to retrieve JSON file with camera parameters from remote server to ease config without rebuilding the app, and without building UI
