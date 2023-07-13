@@ -59,6 +59,7 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
+import java.net.ProtocolException;
 import java.net.URL;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -97,7 +98,9 @@ public class MainActivity extends Activity {
     private ImageReader mImageReader;
     private Thread mCustomRepeatCaptureThread;
     private Boolean mRepeatCaptureRunning;//True = repeat captures running. False = stop captures.
-
+    //Attributes related to Web server to send images
+    private OutputStream mImageOutputStream;
+    private HttpURLConnection mImageServerConnection;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -139,6 +142,9 @@ public class MainActivity extends Activity {
                 //Called every time the surface is updated
             }
         });
+
+        mImageServerConnection = null;
+        mImageOutputStream = null;
 
         //Set refresh button callback
         mRefreshBtn = (Button) findViewById(R.id.refreshBtn);
@@ -439,12 +445,13 @@ public class MainActivity extends Activity {
         thread.start();
         Handler backgroundHandler = new Handler(thread.getLooper());
         //Create the listener to be called when an image is available in the imageReader
-        ImageReader.OnImageAvailableListener saveImageToFileListener = new ImageReader.OnImageAvailableListener() {
+        ImageReader.OnImageAvailableListener imageCaptureListener = new ImageReader.OnImageAvailableListener() {
             @Override
             public void onImageAvailable(ImageReader imageReader) {
                 Log.i(TAG, "IMAGE AVAILABLE");
+                if(mImageOutputStream == null || mImageServerConnection == null){Log.d(TAG,"Connection to img server not established.");return;}
 
-                //Retrieve the image taken from the shot. Get the byte[] associated to it in order to store the image
+                //Retrieve the image taken from the shot. Get the byte[] associated to it in order to send the image
                 Image capture = imageReader.acquireLatestImage();
                 if(capture == null){Log.e(TAG, "capture is null in onImageAvailable().");return;}
                 Image.Plane[] capturePlane = capture.getPlanes();
@@ -452,11 +459,6 @@ public class MainActivity extends Activity {
                 ByteBuffer captureBuffer = capturePlane[0].getBuffer();
                 byte[] captureBytes = new byte[captureBuffer.remaining()];
                 captureBuffer.get(captureBytes);
-
-                //Create the file to save the image to.
-                File path = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES);
-                String imgFileName = String.valueOf(Calendar.getInstance().getTimeInMillis()) + "_shot.jpg";
-                File file = new File(path, imgFileName);
 
                 //Rotate the image
                 Bitmap bitmapShot = BitmapFactory.decodeByteArray(captureBytes, 0, captureBytes.length);
@@ -467,33 +469,26 @@ public class MainActivity extends Activity {
 
                 ByteArrayOutputStream bos = new ByteArrayOutputStream();
                 bitmapShot.compress(Bitmap.CompressFormat.JPEG, 100, bos);
-                byte[] rotatedCaptureBytes = bos.toByteArray();
+                byte[] rotatedCaptureBytes = bos.toByteArray();//Data to send to server
 
                 capture.close();
+
+
                 try {
-                    // Make sure the Pictures directory exists.
-                    path.mkdirs();
-
-                    //Write the capture byte[] into the file
-                    OutputStream os = new FileOutputStream(file);
-                    os.write(rotatedCaptureBytes);
-                    os.close();
-
-                    // Tell the media scanner about the new file so that it is immediately available to the user.
-                    MediaScannerConnection.scanFile(getApplicationContext(), new String[] { file.toString() }, null, new MediaScannerConnection.OnScanCompletedListener() {
-                                public void onScanCompleted(String path, Uri uri) {
-                                    Log.i("ExternalStorage", "Scanned " + path + ":");
-                                    Log.i("ExternalStorage", "-> uri=" + uri);
-                                }
-                            });
-                } catch (IOException e) {
-                    // Unable to create file, likely because external storage is not currently mounted.
-                    Log.w("ExternalStorage", "Error writing " + file, e);
+                    //Create request to send
+                    mImageServerConnection.setRequestMethod("POST");
+                    Bitmap bmpImage = BitmapFactory.decodeByteArray(rotatedCaptureBytes, 0, rotatedCaptureBytes.length);
+                    //Send the request to server
+                    bmpImage.compress(Bitmap.CompressFormat.JPEG, 50, mImageOutputStream);
+                } catch (ProtocolException e) {
+                    Log.d(TAG, "Error sending image to server, ProtocolException", e);
+                    throw new RuntimeException(e);
+                }catch (IOException e) {
+                    Log.d(TAG, "Error sending image to server", e);
                 }
-                //capture.close();
             }
         };
-        mImageReader.setOnImageAvailableListener(saveImageToFileListener, backgroundHandler);
+        mImageReader.setOnImageAvailableListener(imageCaptureListener, backgroundHandler);
 
 
         //Get a capture request
@@ -747,11 +742,31 @@ public class MainActivity extends Activity {
         mRepeatCaptureRunning = false;
     }
 
+    //Initiate the connection to the image output server, instantiate output stream that will later be used in the onImageAvailable of ImageReader
+    public class ImageStreamServerConnection extends Thread{
+        private static final String imgServerIP = "192.168.0.105:8081";// Home IP
+
+        @Override
+        public void run(){
+            //Initiate connexion and get the outputStream to the server to send images
+            URL url = null;
+            try {
+                url = new URL(imgServerIP);
+                mImageServerConnection = (HttpURLConnection) url.openConnection();
+                mImageServerConnection.setDoOutput(true);
+                mImageOutputStream = mImageServerConnection.getOutputStream();
+            } catch (IOException e) {
+                Log.e(TAG, "ImageStreamServerConnection failed to initiate connexion to image webserver");
+                throw new RuntimeException(e);
+            }
+        }
+    }
+
     //Class to retrieve JSON file with camera parameters from remote server to ease config without rebuilding the app, and without building UI
     //Whenever the JSON file is retrieved from the server, the preview is updated with the new parameters. updatePreview() is called.
     public class fetchCameraParams extends Thread{
-        //private static final String fileURLStr = "http://192.168.0.105:8080/camera_parameters.json";// Home IP
-        private static final String fileURLStr = "http://192.168.8.79:8080/camera_parameters.json";// Work IP
+        private static final String fileURLStr = "http://192.168.0.105:8080/camera_parameters.json";// Home IP
+        //private static final String fileURLStr = "http://192.168.8.79:8080/camera_parameters.json";// Work IP
         String data = "";
         JSONObject jsonFile = null;
 
@@ -806,10 +821,6 @@ public class MainActivity extends Activity {
                             mCaptureBtn.setEnabled(true);
                         }
                     });
-
-
-                    //If data are successfully fetched form file, update the preview with the new camera params.
-                    //updatePreview();
                 }
                 else{
                     Log.e(TAG, "JSON FILE IS EMPTY");
