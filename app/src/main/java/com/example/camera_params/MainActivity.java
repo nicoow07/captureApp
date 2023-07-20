@@ -27,6 +27,7 @@ import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.RggbChannelVector;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.icu.util.Calendar;
+import android.icu.util.Output;
 import android.media.Image;
 import android.media.ImageReader;
 import android.media.MediaScannerConnection;
@@ -50,9 +51,13 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.FileReader;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -62,6 +67,7 @@ import java.net.MalformedURLException;
 import java.net.ProtocolException;
 import java.net.URL;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
@@ -237,8 +243,13 @@ public class MainActivity extends Activity {
         //Ask runtime storage permission
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_DENIED) {
             ActivityCompat.requestPermissions(MainActivity.this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 0);
-            Log.i("----Permissions---- ", "Requesting camera permission at run time");
+            Log.i("----Permissions---- ", "Requesting write storage permission at run time");
+        }if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_DENIED) {
+            ActivityCompat.requestPermissions(MainActivity.this, new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, 0);
+            Log.i("----Permissions---- ", "Requesting read storage permission at run time");
         }
+
+        loadCamConfigFromFile();
 
         //Create thread for repeat captures. The thread will run as long as the app is running. The global variable mRepeatCaptureThreadState is read by the thread to manage it's behavior
         mRepeatCaptureRunning = false;//Initially the captures are not taken
@@ -299,13 +310,8 @@ public class MainActivity extends Activity {
         });
         mCustomRepeatCaptureThread.start();
 
-        //Setup background task to monitor the number of images in the directory, and prune the older ones.
-        Thread storageLevelMonitoringThread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-
-            }
-        });
+        //Initiate the connection to image receiving server.
+        //new ImageStreamServerConnection ().start();
     }
 
     //Print in log.i the output sizes supported under JPG format of the camera ID passed in argument
@@ -449,7 +455,7 @@ public class MainActivity extends Activity {
             @Override
             public void onImageAvailable(ImageReader imageReader) {
                 Log.i(TAG, "IMAGE AVAILABLE");
-                if(mImageOutputStream == null || mImageServerConnection == null){Log.d(TAG,"Connection to img server not established.");return;}
+                //if(mImageOutputStream == null || mImageServerConnection == null){Log.d(TAG,"Connection to img server not established.");return;}
 
                 //Retrieve the image taken from the shot. Get the byte[] associated to it in order to send the image
                 Image capture = imageReader.acquireLatestImage();
@@ -473,13 +479,80 @@ public class MainActivity extends Activity {
 
                 capture.close();
 
+                //
+                String serverIp = getResources().getString(R.string.server_ip);
+                String imgServerIP = "http://" + serverIp + ":5000/upload_image";
+                Log.i("WEB SERVER", "Querying URL: " + imgServerIP);
+
+
+                //POST
 
                 try {
-                    //Create request to send
-                    mImageServerConnection.setRequestMethod("POST");
-                    Bitmap bmpImage = BitmapFactory.decodeByteArray(rotatedCaptureBytes, 0, rotatedCaptureBytes.length);
-                    //Send the request to server
-                    bmpImage.compress(Bitmap.CompressFormat.JPEG, 50, mImageOutputStream);
+                    URL url = new URL(imgServerIP);
+                    HttpURLConnection imageServerConnection = (HttpURLConnection) url.openConnection();
+                    imageServerConnection.setRequestMethod("POST");
+                    imageServerConnection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+                    //imageServerConnection.setRequestProperty("Accept", "application/json");
+                    imageServerConnection.setRequestProperty("User-Agent", "Mozilla/5.0");
+                    imageServerConnection.setDoOutput(true);
+
+                    //Send string test - WORKING
+                    /*String jsonInputString = "{name: Upendra, job: Programmer}";
+                    OutputStream os = imageServerConnection.getOutputStream();
+                    byte[] input = jsonInputString.getBytes("utf-8");
+                    os.write(input, 0, input.length);
+                    os.flush();
+                    os.close();*/
+
+                    //Send image
+                    String imgFileName = String.valueOf(Calendar.getInstance().getTimeInMillis()) + "_shot.jpg";
+                    String boundary =  "*****";
+                    imageServerConnection.setRequestProperty("Content-Type", "multipart/form-data;boundary="+boundary);
+                    DataOutputStream os = new DataOutputStream(imageServerConnection.getOutputStream());
+                    os.writeBytes("--" + boundary + "\r\n");
+                    os.writeBytes("Content-Disposition: form-data; name=\"image\";filename=\"" + imgFileName + "\"\r\n"); // uploaded_file_name is the Name of the File to be uploaded
+                    os.writeBytes("\r\n");
+
+
+
+                    InputStream imgInputStream = new ByteArrayInputStream(rotatedCaptureBytes);
+                    int maxBufferSize = 1024*1024;
+                    int bytesAvailable = imgInputStream.available();
+                    int bufferSize = Math.min(bytesAvailable, maxBufferSize);
+                    int bytesRead = 1;
+                    byte[] buffer = new byte[bufferSize];
+                    bytesRead = imgInputStream.read(buffer, 0, bufferSize);
+                    while (bytesRead > 0){
+                        os.write(rotatedCaptureBytes, 0, bufferSize);
+                        bytesAvailable = imgInputStream.available();
+                        bufferSize = Math.min(bytesAvailable, maxBufferSize);
+                        bytesRead = imgInputStream.read(buffer, 0, bufferSize);
+                    }
+                    os.writeBytes("\r\n");
+                    os.writeBytes(("--" + boundary + "--" + "\r\n"));
+                    imgInputStream.close();
+                    os.flush();
+                    os.close();
+
+                    //Response
+                    int responseCode = imageServerConnection.getResponseCode();//THIS LINE SENDS THE POST REQUEST...
+                    if (responseCode == HttpURLConnection.HTTP_OK) { //success
+                        BufferedReader in = new BufferedReader(new InputStreamReader(imageServerConnection.getInputStream()));
+                        String inputLine;
+                        StringBuffer response = new StringBuffer();
+
+                        while ((inputLine = in.readLine()) != null) {
+                            response.append(inputLine);
+                        }
+                        in.close();
+
+                        // print result
+                        System.out.println(response.toString());
+                    } else {
+                        System.out.println("POST request did not work. Request code: " + String.valueOf(responseCode));
+                    }
+
+                    //bmpImage.compress(Bitmap.CompressFormat.JPEG, 50, mImageOutputStream);
                 } catch (ProtocolException e) {
                     Log.d(TAG, "Error sending image to server, ProtocolException", e);
                     throw new RuntimeException(e);
@@ -744,10 +817,13 @@ public class MainActivity extends Activity {
 
     //Initiate the connection to the image output server, instantiate output stream that will later be used in the onImageAvailable of ImageReader
     public class ImageStreamServerConnection extends Thread{
-        private static final String imgServerIP = "192.168.0.105:8081";// Home IP
 
         @Override
         public void run(){
+            String serverIp = getResources().getString(R.string.server_ip);
+            String imgServerIP = "http://" + serverIp + ":5000/upload_image";
+            Log.i("WEB SERVER", "Querying URL: " + imgServerIP);
+
             //Initiate connexion and get the outputStream to the server to send images
             URL url = null;
             try {
@@ -765,13 +841,15 @@ public class MainActivity extends Activity {
     //Class to retrieve JSON file with camera parameters from remote server to ease config without rebuilding the app, and without building UI
     //Whenever the JSON file is retrieved from the server, the preview is updated with the new parameters. updatePreview() is called.
     public class fetchCameraParams extends Thread{
-        private static final String fileURLStr = "http://192.168.0.105:8080/camera_parameters.json";// Home IP
-        //private static final String fileURLStr = "http://192.168.8.79:8080/camera_parameters.json";// Work IP
         String data = "";
         JSONObject jsonFile = null;
 
         @Override
         public void run() {
+            String serverIp = getResources().getString(R.string.server_ip);
+            String fileURLStr = "http://" + serverIp + ":8080/camera_parameters.json";
+            Log.i("WEB SERVER", "Querying URL: " + fileURLStr);
+
             try{
                 //Init jsonFile with dummy values
                 jsonFile = new JSONObject();
@@ -808,6 +886,24 @@ public class MainActivity extends Activity {
                         throw new RuntimeException(e);
                     }
 
+                    // Save config file
+                    File dir = new File(getApplicationContext().getFilesDir(), getResources().getString(R.string.config_dir));
+                    if(!dir.exists()){
+                        dir.mkdir();
+                    }
+                    Log.i("WRITE DIR", dir.toString());
+
+                    try {
+                        File gpxfile = new File(dir, getResources().getString(R.string.camera_config_file));
+                        FileWriter writer = new FileWriter(gpxfile);
+                        writer.append((CharSequence) jsonFile);
+                        writer.flush();
+                        writer.close();
+                    } catch (Exception e){
+                        e.printStackTrace();
+                    }
+                    Log.i(TAG, "Successfully wrote config to file");
+
                     //This is purely random. If startpreview (and createCaptureSession) is not called from UI thread, it throw error "IllegalArgumentException: No handler given, and current thread has no looper!"
                     runOnUiThread(new Runnable() {
                         @Override
@@ -839,6 +935,76 @@ public class MainActivity extends Activity {
                 MainActivity.this.displayCameraParams(jsonFile);
             }
         }
+    }
+
+    public void loadCamConfigFromFile() {
+        //Initialise config with dummy values
+        JSONObject jsonConfig = new JSONObject();// JSON object that will receive the file content
+        try {
+            jsonConfig.put("shutter_speed", "1000000");
+            jsonConfig.put("focus_distance", "1");
+            jsonConfig.put("iso", "500");
+            jsonConfig.put("wb_balance", "50");
+            jsonConfig.put("capture_per_sec", "1");
+            jsonConfig.put("output_size", "720x480");
+            jsonConfig.put("output_rotation", "90");
+        } catch (JSONException ex) {
+            Log.e(TAG, "Error while creating JSON config object");
+            throw new RuntimeException(ex);
+        }
+
+        //Create directory
+        File dir = new File(getApplicationContext().getFilesDir(), getResources().getString(R.string.config_dir));
+        if(!dir.exists()){
+            dir.mkdir();
+        }
+        Log.i("READ DIR", dir.toString());
+
+        //Read text from file
+        StringBuilder text = new StringBuilder();
+        try {
+            File gpxfile = new File(dir, getResources().getString(R.string.camera_config_file));
+            FileReader reader = new FileReader(gpxfile);
+            BufferedReader br = new BufferedReader(reader);
+            String line;
+
+            while ((line = br.readLine()) != null) {
+                text.append(line);
+                text.append('\n');
+            }
+            br.close();
+
+            Log.i("FILE", String.valueOf(text));
+        }
+        catch (IOException e) {
+            Log.e(TAG, "Error while reading camera config file");
+        }
+
+        //Fill in the JSON object with the file just read
+        if(text.length() > 0){
+            try {
+                jsonConfig = new JSONObject(String.valueOf(text));
+            } catch (JSONException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        try {
+            //Extract data from JSON to array map
+            mCurrentCameraParamsMap.put("shutter_speed", jsonConfig.getString("shutter_speed"));
+            mCurrentCameraParamsMap.put("focus_distance", jsonConfig.getString("focus_distance"));
+            mCurrentCameraParamsMap.put("iso", jsonConfig.getString("iso"));
+            mCurrentCameraParamsMap.put("wb_balance", jsonConfig.getString("wb_balance"));
+            mCurrentCameraParamsMap.put("capture_per_sec", jsonConfig.getString("capture_per_sec"));
+            mCurrentCameraParamsMap.put("output_size", jsonConfig.getString("output_size"));
+            mCurrentCameraParamsMap.put("output_rotation", jsonConfig.getString("output_rotation"));
+        } catch (JSONException e) {
+            throw new RuntimeException(e);
+        }
+        finally {
+            MainActivity.this.displayCameraParams(jsonConfig);
+        }
+
     }
 
     //Return the object used as parameter for COLOR_CORRECTION_GAINS
