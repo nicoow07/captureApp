@@ -76,12 +76,11 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <androidx.appcompat.widget.AppCompatToggleButton
+    <ToggleButton
         android:id="@+id/captureBtn"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginEnd="16dp"
-        android:text="Capture"
         android:textOff="Start capturing"
         android:textOn="Stop capturing"
         app:layout_constraintBottom_toBottomOf="parent"

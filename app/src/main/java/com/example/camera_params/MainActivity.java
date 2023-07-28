@@ -46,6 +46,8 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.CompoundButton;
 import android.widget.TextView;
+import android.widget.Toast;
+import android.widget.ToggleButton;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -55,6 +57,8 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.FileWriter;
@@ -78,7 +82,7 @@ public class MainActivity extends Activity {
     public static final String CAMERA_FOCUS = "";//
     private static final int CAMERA_REQUEST_CODE = 234;
     private Button mRefreshBtn;
-    private AppCompatToggleButton mCaptureBtn;
+    private ToggleButton mCaptureBtn;
     private TextView mShutterSpeedTextView;
     private TextView mFocusTextView;
     private TextView mIsoTextView;
@@ -129,7 +133,7 @@ public class MainActivity extends Activity {
             @Override
             public void onSurfaceTextureAvailable(@NonNull SurfaceTexture surfaceTexture, int i, int i1) {
                 Log.i("Surface texture", "onSurfaceTextureAvailable");
-                openCamera();
+                //openCamera(); //Called in OnResume()
             }
 
             @Override
@@ -149,6 +153,9 @@ public class MainActivity extends Activity {
             }
         });
 
+        //Load saved camera config + start preview
+        loadCamConfigFromFile();
+
         mImageServerConnection = null;
         mImageOutputStream = null;
 
@@ -162,7 +169,7 @@ public class MainActivity extends Activity {
         });
 
         //Set capture btn callback
-        mCaptureBtn = (AppCompatToggleButton) findViewById(R.id.captureBtn);
+        mCaptureBtn = (ToggleButton) findViewById(R.id.captureBtn);
         mCaptureBtn.setEnabled(false);//Disable button until camera parameters have been fetched from file on server
         mCaptureBtn.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
@@ -172,9 +179,13 @@ public class MainActivity extends Activity {
                 Log.i("TOGGLE BUTTON CHANGED", Boolean.toString(b));
 
                 if(b == true){
+                    //Disable refresh camera params during capture mode
+                    mRefreshBtn.setEnabled(false);
                     //Start repeat capture thread
                     startCustomRepeatCapture();
                 }else{
+                    //Enable back refresh camera params
+                    mRefreshBtn.setEnabled(true);
                     stopCustomRepeatCapture();
                 }
             }
@@ -186,6 +197,17 @@ public class MainActivity extends Activity {
             public void onOpened(CameraDevice camera) {
                 Log.i(TAG, "on camera opened");
                 mCameraDevice = camera;
+
+                //If parameters already loaded from file or from webserver, start preview
+                if(!mCurrentCameraParamsMap.isEmpty()){
+                    //Start preview
+                    startPreview();
+                    //Set capture params
+                    setupCameraShotRequest();
+
+                    //Enable capture button
+                    mCaptureBtn.setEnabled(true);
+                }
             }
 
             @Override
@@ -248,8 +270,6 @@ public class MainActivity extends Activity {
             ActivityCompat.requestPermissions(MainActivity.this, new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, 0);
             Log.i("----Permissions---- ", "Requesting read storage permission at run time");
         }
-
-        loadCamConfigFromFile();
 
         //Create thread for repeat captures. The thread will run as long as the app is running. The global variable mRepeatCaptureThreadState is read by the thread to manage it's behavior
         mRepeatCaptureRunning = false;//Initially the captures are not taken
@@ -314,6 +334,20 @@ public class MainActivity extends Activity {
         //new ImageStreamServerConnection ().start();
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        Log.i(TAG, "APPLICATION RESUMED");
+        openCamera();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        Log.i(TAG, "APPLICATION PAUSED");
+        closeCamera();
+    }
+
     //Print in log.i the output sizes supported under JPG format of the camera ID passed in argument
     public void logOutputSizes() {
         //Display output sizes (under jpg format)
@@ -340,18 +374,22 @@ public class MainActivity extends Activity {
 
     // Function called by class fetchCameraParams when the data are retrieved from server
     public void displayCameraParams(JSONObject jsonObj) {
-        Log.i("FETCHED CAMERA PARAMS", jsonObj.toString());
+        Log.i("DISPLAY CAMERA PARAMS", jsonObj.toString());
 
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                mShutterSpeedTextView.setText("Shutter speed: " + "1/" + mCurrentCameraParamsMap.get("shutter_speed"));
-                mFocusTextView.setText("Focus: " + mCurrentCameraParamsMap.get("focus_distance"));
-                mIsoTextView.setText("ISO: " + mCurrentCameraParamsMap.get("iso"));
-                mWbBalanceTextView.setText("W&B balance: " + mCurrentCameraParamsMap.get("wb_balance"));
-                mcaptureRateTextView.setText("Capture / sec: " + mCurrentCameraParamsMap.get("capture_per_sec"));
-                moutputSizeTextView.setText("Capture format: " + mCurrentCameraParamsMap.get("output_size"));
-                moutputRotationTextView.setText("Image rotation: " + mCurrentCameraParamsMap.get("output_rotation"));
+                try {
+                    mShutterSpeedTextView.setText("Shutter speed: " + "1/" + jsonObj.get("shutter_speed"));
+                    mFocusTextView.setText("Focus: " + jsonObj.get("focus_distance"));
+                    mIsoTextView.setText("ISO: " + jsonObj.get("iso"));
+                    mWbBalanceTextView.setText("W&B balance: " + jsonObj.get("wb_balance"));
+                    mcaptureRateTextView.setText("Capture / sec: " + jsonObj.get("capture_per_sec"));
+                    moutputSizeTextView.setText("Capture format: " + jsonObj.get("output_size"));
+                    moutputRotationTextView.setText("Image rotation: " + jsonObj.get("output_rotation"));
+                } catch (JSONException e) {
+                    throw new RuntimeException(e);
+                }
             }
         });
 
@@ -413,6 +451,10 @@ public class MainActivity extends Activity {
             Log.e(TAG, "CameraAccessException when opening the camera");
             e.printStackTrace();
         }
+    }
+
+    public void closeCamera(){
+        mCameraDevice.close();
     }
 
     public void startPreview(){
@@ -558,6 +600,19 @@ public class MainActivity extends Activity {
                     throw new RuntimeException(e);
                 }catch (IOException e) {
                     Log.d(TAG, "Error sending image to server", e);
+
+                    //Stop capturing
+                    stopCustomRepeatCapture();
+                    //Update button text
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            mCaptureBtn.setChecked(false);
+                            CharSequence text = mCaptureBtn.isChecked() ? mCaptureBtn.getTextOn() : mCaptureBtn.getTextOff();
+                            mCaptureBtn.setText(text);
+                            Toast.makeText(getApplicationContext(), "Unable to send pictures to server", Toast.LENGTH_LONG).show();
+                        }
+                    });
                 }
             }
         };
@@ -853,14 +908,8 @@ public class MainActivity extends Activity {
             try{
                 //Init jsonFile with dummy values
                 jsonFile = new JSONObject();
-                jsonFile.put("shutter_speed", "1/?");
-                jsonFile.put("focus_distance", "?");
-                jsonFile.put("iso", "?");
-                jsonFile.put("wb_balance", "?");
-                jsonFile.put("capture_per_sec", "0");
-                jsonFile.put("output_size", "720x480");
-                jsonFile.put("output_rotation", "90");
 
+                //HTTP REQUEST
                 URL url = new URL(fileURLStr);
                 HttpURLConnection httpUrlCnx = (HttpURLConnection) url.openConnection();
                 InputStream inputstream = httpUrlCnx.getInputStream();
@@ -887,22 +936,13 @@ public class MainActivity extends Activity {
                     }
 
                     // Save config file
-                    File dir = new File(getApplicationContext().getFilesDir(), getResources().getString(R.string.config_dir));
-                    if(!dir.exists()){
-                        dir.mkdir();
-                    }
-                    Log.i("WRITE DIR", dir.toString());
-
-                    try {
-                        File gpxfile = new File(dir, getResources().getString(R.string.camera_config_file));
-                        FileWriter writer = new FileWriter(gpxfile);
-                        writer.append((CharSequence) jsonFile);
-                        writer.flush();
-                        writer.close();
-                    } catch (Exception e){
-                        e.printStackTrace();
-                    }
+                    FileOutputStream fOut = openFileOutput(getResources().getString(R.string.camera_config_file),Context.MODE_PRIVATE);
+                    fOut.write(jsonFile.toString().getBytes());
+                    fOut.close();
                     Log.i(TAG, "Successfully wrote config to file");
+
+                    //Display new config
+                    MainActivity.this.displayCameraParams(jsonFile);
 
                     //This is purely random. If startpreview (and createCaptureSession) is not called from UI thread, it throw error "IllegalArgumentException: No handler given, and current thread has no looper!"
                     runOnUiThread(new Runnable() {
@@ -921,25 +961,23 @@ public class MainActivity extends Activity {
                 else{
                     Log.e(TAG, "JSON FILE IS EMPTY");
                 }
-            } catch (MalformedURLException e) {
+            } catch (IOException | JSONException e) {
                 Log.e(TAG, "MalformedURLException thrown when retrieving JSON file with camera params");
-                //throw new RuntimeException(e);
-            } catch (JSONException e) {
-                Log.e(TAG, "MalformedURLException thrown when retrieving JSON file with camera params");
-                //throw new RuntimeException(e);
-            } catch (IOException e) {
-                Log.e(TAG, "MalformedURLException thrown when retrieving JSON file with camera params");
-                //throw new RuntimeException(e);
-            }
-            finally {
-                MainActivity.this.displayCameraParams(jsonFile);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        Toast.makeText(getApplicationContext(), "Unable to receive config data from server", Toast.LENGTH_LONG).show();
+                    }
+                });
+
             }
         }
     }
 
     public void loadCamConfigFromFile() {
-        //Initialise config with dummy values
+
         JSONObject jsonConfig = new JSONObject();// JSON object that will receive the file content
+        //Initialise config with dummy values
         try {
             jsonConfig.put("shutter_speed", "1000000");
             jsonConfig.put("focus_distance", "1");
@@ -953,32 +991,21 @@ public class MainActivity extends Activity {
             throw new RuntimeException(ex);
         }
 
-        //Create directory
-        File dir = new File(getApplicationContext().getFilesDir(), getResources().getString(R.string.config_dir));
-        if(!dir.exists()){
-            dir.mkdir();
-        }
-        Log.i("READ DIR", dir.toString());
-
-        //Read text from file
-        StringBuilder text = new StringBuilder();
+        //READ config file
+        String text = "";
         try {
-            File gpxfile = new File(dir, getResources().getString(R.string.camera_config_file));
-            FileReader reader = new FileReader(gpxfile);
-            BufferedReader br = new BufferedReader(reader);
-            String line;
-
-            while ((line = br.readLine()) != null) {
-                text.append(line);
-                text.append('\n');
+            FileInputStream fin = openFileInput(getResources().getString(R.string.camera_config_file));
+            int c;
+            while( (c = fin.read()) != -1){
+                text = text + Character.toString((char)c);
             }
-            br.close();
+            fin.close();
+        } catch (FileNotFoundException e) {
+            Log.e(TAG, "Error, config file not found");
+        } catch (IOException e) {
+            Log.e(TAG, "Error reading config file");
+        }
 
-            Log.i("FILE", String.valueOf(text));
-        }
-        catch (IOException e) {
-            Log.e(TAG, "Error while reading camera config file");
-        }
 
         //Fill in the JSON object with the file just read
         if(text.length() > 0){
