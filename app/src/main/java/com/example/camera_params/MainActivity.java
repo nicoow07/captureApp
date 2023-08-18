@@ -120,7 +120,7 @@ public class MainActivity extends Activity {
         setContentView(R.layout.activity_main);
 
         //INIT VARIABLES
-        mCaptureSessionCount = 1;
+        mCaptureSessionCount = 0;
         mWaitingTextureToStartPreview = false;
         mCurrentCameraParamsMap = new ArrayMap<String, String>();
         //Retrieve UI widgets
@@ -186,12 +186,14 @@ public class MainActivity extends Activity {
                 Log.i("TOGGLE BUTTON CHANGED", Boolean.toString(b));
 
                 if(b == true){
-                    //Start repeat capture thread
-                    startCustomRepeatCapture();
-                }else{
                     //Start a new capture session: increase its count
                     mCaptureSessionCount = mCaptureSessionCount + 1;
-                    stopCustomRepeatCapture();
+                    //Send capture session ID to img processing server. Indicating we are starting a capture session.
+                    //And then start the custom repeat capture thread
+                    new startNewCaptureSession().start();
+                }else{
+                    //Send close capture session request to img proc server, and stop custom repeat capture thread.
+                    new closeCaptureSession().start();
                 }
             }
         });
@@ -472,7 +474,8 @@ public class MainActivity extends Activity {
         }
     }
 
-    
+
+
     // To start the preview, the camera must be opened and the texture for the preview must be available
     public void startPreview(){
         Log.i(TAG,"Starting preview");
@@ -542,13 +545,11 @@ public class MainActivity extends Activity {
 
                 capture.close();
 
-                //
+
+                //POST request to send image
                 String serverIp = getResources().getString(R.string.server_ip);
                 String imgServerIP = "http://" + serverIp + ":5000/upload_image";
                 Log.i("WEB SERVER", "Querying URL: " + imgServerIP);
-
-
-                //POST
 
                 try {
                     URL url = new URL(imgServerIP);
@@ -567,24 +568,18 @@ public class MainActivity extends Activity {
                     os.flush();
                     os.close();*/
 
-                    //Send image
+                    //Prep request
                     String imgFileName = String.valueOf(Calendar.getInstance().getTimeInMillis()) + "_shot.jpg";
                     String boundary =  "*****";
                     imageServerConnection.setRequestProperty("Content-Type", "multipart/form-data;boundary="+boundary);
                     DataOutputStream os = new DataOutputStream(imageServerConnection.getOutputStream());
 
-                    //Send capture session number
-                    os.writeBytes("--" + boundary + "\r\n");
-                    os.writeBytes("Content-Disposition: form-data; name=\"capture_session_count\"\r\n"); // uploaded_file_name is the Name of the File to be uploaded
-                    os.writeBytes("\r\n");
-                    os.writeBytes(Integer.toString(mCaptureSessionCount));
-                    os.writeBytes("\r\n");
-
-                    // Send image
+                    // Send image metadata
                     os.writeBytes("--" + boundary + "\r\n");
                     os.writeBytes("Content-Disposition: form-data; name=\"image\";filename=\"" + imgFileName + "\"\r\n"); // uploaded_file_name is the Name of the File to be uploaded
                     os.writeBytes("\r\n");
 
+                    //Send image
                     InputStream imgInputStream = new ByteArrayInputStream(rotatedCaptureBytes);
                     int maxBufferSize = 1024*1024;
                     int bytesAvailable = imgInputStream.available();
@@ -845,6 +840,126 @@ public class MainActivity extends Activity {
                 mCaptureBtn.setChecked(false);
             }
         });
+    }
+
+    // ===== SERVERS REQUESTS =====
+    //Requests to camera param server and image processing server
+
+    //Send a POST request to the image processing server with the new capture session ID (= count)
+    // When response received, the capture starts
+    public class startNewCaptureSession extends Thread{
+        @Override
+        public void run() {
+            String serverIp = getResources().getString(R.string.server_ip);
+            String imgServerIP = "http://" + serverIp + ":5000/new_capture_session";
+            Log.i("WEB SERVER", "Querying URL: " + imgServerIP);
+
+            try {
+                URL url = new URL(imgServerIP);
+                HttpURLConnection imageServerConnection = (HttpURLConnection) url.openConnection();
+                imageServerConnection.setRequestMethod("POST");
+                imageServerConnection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+                //imageServerConnection.setRequestProperty("Accept", "application/json");
+                imageServerConnection.setRequestProperty("User-Agent", "Mozilla/5.0");
+                imageServerConnection.setDoOutput(true);
+
+                //Send the capture session ID = count
+                String boundary = "*****";
+                imageServerConnection.setRequestProperty("Content-Type", "multipart/form-data;boundary=" + boundary);
+                DataOutputStream os = new DataOutputStream(imageServerConnection.getOutputStream());
+
+                //Send capture session number
+                os.writeBytes("--" + boundary + "\r\n");
+                os.writeBytes("Content-Disposition: form-data; name=\"capture_session_count\"\r\n"); // uploaded_file_name is the Name of the File to be uploaded
+                os.writeBytes("\r\n");
+                os.writeBytes(Integer.toString(mCaptureSessionCount));
+                os.writeBytes("\r\n");
+                os.writeBytes("--" + boundary + "--\r\n");
+
+                //Response
+                int responseCode = imageServerConnection.getResponseCode();//THIS LINE SENDS THE POST REQUEST...
+                if (responseCode == HttpURLConnection.HTTP_OK) { //success
+                    BufferedReader in = new BufferedReader(new InputStreamReader(imageServerConnection.getInputStream()));
+                    String inputLine;
+                    StringBuffer response = new StringBuffer();
+
+                    while ((inputLine = in.readLine()) != null) {
+                        response.append(inputLine);
+                    }
+                    in.close();
+
+                    // print result
+                    System.out.println(response.toString());
+
+                    //Start capture session
+                    //Start repeat capture thread
+                    startCustomRepeatCapture();
+                } else {
+                    System.out.println("/new_capture_session POST request did not work. Request code: " + String.valueOf(responseCode));
+                }
+
+            } catch (IOException e) {
+                Log.e(TAG, "IOException thrown when sending new capture session ID: " + e);
+                stopCustomRepeatCapture();
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        Toast.makeText(getApplicationContext(), "Unable to send capture session ID to server", Toast.LENGTH_LONG).show();
+                    }
+                });
+
+            }
+        }
+    }
+
+    public class closeCaptureSession extends Thread{
+        @Override
+        public void run() {
+            //First stop the thread capturing images from the phone
+            stopCustomRepeatCapture();
+
+            //Send close request to img processing server
+            String serverIp = getResources().getString(R.string.server_ip);
+            String imgServerIP = "http://" + serverIp + ":5000/close_capture_session";
+            Log.i("WEB SERVER", "Querying URL: " + imgServerIP);
+
+            try {
+                URL url = new URL(imgServerIP);
+                HttpURLConnection imageServerConnection = (HttpURLConnection) url.openConnection();
+                imageServerConnection.setRequestMethod("GET");
+                imageServerConnection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+                //imageServerConnection.setRequestProperty("Accept", "application/json");
+                imageServerConnection.setRequestProperty("User-Agent", "Mozilla/5.0");
+
+                //Response
+                int responseCode = imageServerConnection.getResponseCode();//THIS LINE SENDS THE GET REQUEST...
+                if (responseCode == HttpURLConnection.HTTP_OK) { //success
+                    BufferedReader in = new BufferedReader(new InputStreamReader(imageServerConnection.getInputStream()));
+                    String inputLine;
+                    StringBuffer response = new StringBuffer();
+
+                    while ((inputLine = in.readLine()) != null) {
+                        response.append(inputLine);
+                    }
+                    in.close();
+
+                    // print result
+                    System.out.println(response.toString());
+                } else {
+                    System.out.println("/close_capture_session GET request did not work. Request code: " + String.valueOf(responseCode));
+                }
+
+            } catch (IOException e) {
+                Log.e(TAG, "IOException thrown when closing the current capture session: " + e);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        Toast.makeText(getApplicationContext(), "Unable to send close capture session request to server", Toast.LENGTH_LONG).show();
+                    }
+                });
+
+            }
+        }
     }
 
     //Class to retrieve JSON file with camera parameters from remote server to ease config without rebuilding the app, and without building UI
