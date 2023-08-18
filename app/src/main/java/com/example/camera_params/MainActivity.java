@@ -98,6 +98,7 @@ public class MainActivity extends Activity {
     private CameraCharacteristics mCamCharacteristics;
     private String mBackCamId;
     private Size mPreviewSize;
+    private Boolean mWaitingTextureToStartPreview;
     private CameraDevice.StateCallback mCameraOpenCallback;
     private CameraDevice mCameraDevice;
     // Preview
@@ -111,6 +112,7 @@ public class MainActivity extends Activity {
     //Attributes related to Web server to send images
     private OutputStream mImageOutputStream;
     private HttpURLConnection mImageServerConnection;
+    private int mCaptureSessionCount;// Count to send to the analysis script.
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -118,6 +120,8 @@ public class MainActivity extends Activity {
         setContentView(R.layout.activity_main);
 
         //INIT VARIABLES
+        mCaptureSessionCount = 1;
+        mWaitingTextureToStartPreview = false;
         mCurrentCameraParamsMap = new ArrayMap<String, String>();
         //Retrieve UI widgets
         mShutterSpeedTextView = (TextView) findViewById(R.id.shutterSpeedTextView);
@@ -133,7 +137,10 @@ public class MainActivity extends Activity {
             @Override
             public void onSurfaceTextureAvailable(@NonNull SurfaceTexture surfaceTexture, int i, int i1) {
                 Log.i("Surface texture", "onSurfaceTextureAvailable");
-                //openCamera(); //Called in OnResume()
+                // If the preview is the last blocking element to start preview, start it.
+                if(mWaitingTextureToStartPreview){
+                    startPreview();
+                }
             }
 
             @Override
@@ -179,13 +186,11 @@ public class MainActivity extends Activity {
                 Log.i("TOGGLE BUTTON CHANGED", Boolean.toString(b));
 
                 if(b == true){
-                    //Disable refresh camera params during capture mode
-                    mRefreshBtn.setEnabled(false);
                     //Start repeat capture thread
                     startCustomRepeatCapture();
                 }else{
-                    //Enable back refresh camera params
-                    mRefreshBtn.setEnabled(true);
+                    //Start a new capture session: increase its count
+                    mCaptureSessionCount = mCaptureSessionCount + 1;
                     stopCustomRepeatCapture();
                 }
             }
@@ -195,15 +200,13 @@ public class MainActivity extends Activity {
         mCameraOpenCallback = new CameraDevice.StateCallback() {
             @Override
             public void onOpened(CameraDevice camera) {
-                Log.i(TAG, "on camera opened");
+                Log.i(TAG, "CAMERA OPENED");
                 mCameraDevice = camera;
 
                 //If parameters already loaded from file or from webserver, start preview
                 if(!mCurrentCameraParamsMap.isEmpty()){
                     //Start preview
                     startPreview();
-                    //Set capture params
-                    setupCameraShotRequest();
 
                     //Enable capture button
                     mCaptureBtn.setEnabled(true);
@@ -307,7 +310,11 @@ public class MainActivity extends Activity {
                         //==========Take capture===========
                         try {
                             mCaptureSession.capture(mShotCaptureBuilder.build(), captureCallback, backgroundHandler);
-                        } catch (CameraAccessException e) {
+                        } catch(IllegalStateException e){
+                            Log.d(TAG, "CameraDevice was already closed");
+                            stopCustomRepeatCapture();
+                        }
+                        catch (CameraAccessException e) {
                             e.printStackTrace();
                         }
 
@@ -329,22 +336,28 @@ public class MainActivity extends Activity {
             }
         });
         mCustomRepeatCaptureThread.start();
-
-        //Initiate the connection to image receiving server.
-        //new ImageStreamServerConnection ().start();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         Log.i(TAG, "APPLICATION RESUMED");
-        openCamera();
     }
-
     @Override
     protected void onPause() {
         super.onPause();
         Log.i(TAG, "APPLICATION PAUSED");
+    }
+    @Override
+    protected void onStart() {
+        super.onStart();
+        Log.i(TAG, "APPLICATION STARTED");
+        openCamera();
+    }
+    @Override
+    protected void onStop() {
+        super.onStop();
+        Log.i(TAG, "APPLICATION STOPPED");
         closeCamera();
     }
 
@@ -454,9 +467,13 @@ public class MainActivity extends Activity {
     }
 
     public void closeCamera(){
-        mCameraDevice.close();
+        if(mCameraDevice != null){
+            mCameraDevice.close();
+        }
     }
 
+    
+    // To start the preview, the camera must be opened and the texture for the preview must be available
     public void startPreview(){
         Log.i(TAG,"Starting preview");
         //Check cameraDevice object is working
@@ -466,6 +483,7 @@ public class MainActivity extends Activity {
             return;
         } else if (!mTextureView.isAvailable()) {
             Log.e(TAG, "startPreview fail, Texture view is not available");
+            mWaitingTextureToStartPreview = true;
             return;
         }
 
@@ -501,7 +519,10 @@ public class MainActivity extends Activity {
 
                 //Retrieve the image taken from the shot. Get the byte[] associated to it in order to send the image
                 Image capture = imageReader.acquireLatestImage();
-                if(capture == null){Log.e(TAG, "capture is null in onImageAvailable().");return;}
+                if(capture == null){
+                    Log.e(TAG, "capture is null in onImageAvailable().");
+                    return;
+                }
                 Image.Plane[] capturePlane = capture.getPlanes();
                 //Let's try first by storing only the [0] Plane
                 ByteBuffer captureBuffer = capturePlane[0].getBuffer();
@@ -551,11 +572,18 @@ public class MainActivity extends Activity {
                     String boundary =  "*****";
                     imageServerConnection.setRequestProperty("Content-Type", "multipart/form-data;boundary="+boundary);
                     DataOutputStream os = new DataOutputStream(imageServerConnection.getOutputStream());
+
+                    //Send capture session number
+                    os.writeBytes("--" + boundary + "\r\n");
+                    os.writeBytes("Content-Disposition: form-data; name=\"capture_session_count\"\r\n"); // uploaded_file_name is the Name of the File to be uploaded
+                    os.writeBytes("\r\n");
+                    os.writeBytes(Integer.toString(mCaptureSessionCount));
+                    os.writeBytes("\r\n");
+
+                    // Send image
                     os.writeBytes("--" + boundary + "\r\n");
                     os.writeBytes("Content-Disposition: form-data; name=\"image\";filename=\"" + imgFileName + "\"\r\n"); // uploaded_file_name is the Name of the File to be uploaded
                     os.writeBytes("\r\n");
-
-
 
                     InputStream imgInputStream = new ByteArrayInputStream(rotatedCaptureBytes);
                     int maxBufferSize = 1024*1024;
@@ -603,11 +631,10 @@ public class MainActivity extends Activity {
 
                     //Stop capturing
                     stopCustomRepeatCapture();
-                    //Update button text
+                    //Update button text on UI thread
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
-                            mCaptureBtn.setChecked(false);
                             CharSequence text = mCaptureBtn.isChecked() ? mCaptureBtn.getTextOn() : mCaptureBtn.getTextOff();
                             mCaptureBtn.setText(text);
                             Toast.makeText(getApplicationContext(), "Unable to send pictures to server", Toast.LENGTH_LONG).show();
@@ -649,6 +676,8 @@ public class MainActivity extends Activity {
         } catch (CameraAccessException e) {
             e.printStackTrace();
         }
+
+        setupCameraShotRequest();
     }
 
     public void updatePreview(){
@@ -708,6 +737,15 @@ public class MainActivity extends Activity {
             Log.e(TAG, "mCameraDevice is NULL");
             return;
         }
+        if (!mTextureView.isAvailable()) {
+            Log.e(TAG, "setupCameraShotRequest fail, Texture view is not available");
+            return;
+        }
+        if(mTextureView == null){
+            Log.e(TAG, "mTextureView is NULL");
+            return;
+        }
+
         //Create a capture request for shots taking
         try {
             mShotCaptureBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
@@ -784,113 +822,29 @@ public class MainActivity extends Activity {
         Log.i("Sleeping time:", Long.toString(sleepTime));
     }
 
-    public void stopShotRepeatCapture(){
-        try {
-            mCaptureSession.stopRepeating();
-            mCaptureSession.abortCaptures();
-        } catch (CameraAccessException e) {
-            e.printStackTrace();
-        }
-    }
-
-    public void startShotRepeatCapture(){
-
-        Log.i(TAG, "takeShot()");
-        if(mCameraDevice == null | mShotCaptureBuilder == null) {
-            Log.e(TAG, "takeShot error: camera is null or capture builder");
-            return;
-        }
-        if(mCurrentCameraParamsMap.get("focus_distance") == null || mCurrentCameraParamsMap.get("shutter_speed") == null || mCurrentCameraParamsMap.get("iso") == null){
-            Log.i(TAG, "mCurrentCameraParamsMap has some null fields in takeShot().");
-            return;
-        }
-
-        Long frameRate = Long.parseLong(mCurrentCameraParamsMap.get("capture_per_sec"));// In nanosec
-        Long frameDuration = 1000000000L / frameRate;
-        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(frameRate.intValue(), frameRate.intValue()));//Makes no sense as AR is OFF, but depending on devices, this allow to set custom frame rates
-
-
-        //Set Focus
-        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE);
-        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
-        Float focusDistance = Float.parseFloat(mCurrentCameraParamsMap.get("focus_distance"));
-        mShotCaptureBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE, focusDistance);
-
-        //Set Manual W/B balance. Recommended to do before setting AE off
-        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF);//Turn off auto white balance
-        mShotCaptureBuilder.set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX);//Turn off auto white balance
-        RggbChannelVector gain = colorTemperature(Integer.parseInt(mCurrentCameraParamsMap.get("wb_balance")));
-        mShotCaptureBuilder.set(CaptureRequest.COLOR_CORRECTION_GAINS, gain);
-
-        //Set Exposure time
-        mShotCaptureBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);//Required to set manual exposure time
-        Long exposureTime = Long.parseLong(mCurrentCameraParamsMap.get("shutter_speed"));
-        mShotCaptureBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposureTime);
-
-        //Set ISO sensitivity
-        Integer iso = Integer.parseInt(mCurrentCameraParamsMap.get("iso"));
-        mShotCaptureBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, iso);
-
-        //Set frame rate
-
-        Log.i("Frame Duration:", Long.toString(frameDuration));
-        mShotCaptureBuilder.set(CaptureRequest.SENSOR_FRAME_DURATION, frameDuration);
-
-        //Create a thread to send capture request in loop.
-        HandlerThread thread = new HandlerThread("ShotCapture");
-        thread.start();
-        Handler backgroundHandler = new Handler(thread.getLooper());
-
-        try {
-            CameraCaptureSession.CaptureCallback captureCallback = new CameraCaptureSession.CaptureCallback() {
-                @Override
-                public void onCaptureCompleted(@NonNull CameraCaptureSession session, @NonNull CaptureRequest request, @NonNull TotalCaptureResult result) {
-                    super.onCaptureCompleted(session, request, result);
-                    Long effectiveExposureTime = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
-                    Log.i("EFFECTIVE EXP TIME", String.valueOf(effectiveExposureTime));
-
-                    Integer effectiveISO = result.get(CaptureResult.SENSOR_SENSITIVITY);
-                    Log.i("EFFECTIVE ISO", String.valueOf(effectiveISO));
-
-                    Long effectiveFrameDuration = result.get(CaptureResult.SENSOR_FRAME_DURATION);
-                    Log.i("EFFECTIVE FRAME DURATION", String.valueOf(effectiveFrameDuration));
-                }
-            };
-            mCaptureSession.setRepeatingRequest(mShotCaptureBuilder.build(), captureCallback, backgroundHandler);
-        } catch (CameraAccessException e) {
-            e.printStackTrace();
-        }
-    }
-
     public void startCustomRepeatCapture(){
         mRepeatCaptureRunning = true;
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                //Disable refresh camera params during capture mode
+                mRefreshBtn.setEnabled(false);
+                mCaptureBtn.setChecked(true);
+            }
+        });
     }
 
+    //Stop running the capture thread, and update buttons
     public void stopCustomRepeatCapture(){
         mRepeatCaptureRunning = false;
-    }
-
-    //Initiate the connection to the image output server, instantiate output stream that will later be used in the onImageAvailable of ImageReader
-    public class ImageStreamServerConnection extends Thread{
-
-        @Override
-        public void run(){
-            String serverIp = getResources().getString(R.string.server_ip);
-            String imgServerIP = "http://" + serverIp + ":5000/upload_image";
-            Log.i("WEB SERVER", "Querying URL: " + imgServerIP);
-
-            //Initiate connexion and get the outputStream to the server to send images
-            URL url = null;
-            try {
-                url = new URL(imgServerIP);
-                mImageServerConnection = (HttpURLConnection) url.openConnection();
-                mImageServerConnection.setDoOutput(true);
-                mImageOutputStream = mImageServerConnection.getOutputStream();
-            } catch (IOException e) {
-                Log.e(TAG, "ImageStreamServerConnection failed to initiate connexion to image webserver");
-                throw new RuntimeException(e);
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                //Enable back refresh camera params
+                mRefreshBtn.setEnabled(true);
+                mCaptureBtn.setChecked(false);
             }
-        }
+        });
     }
 
     //Class to retrieve JSON file with camera parameters from remote server to ease config without rebuilding the app, and without building UI
@@ -950,8 +904,6 @@ public class MainActivity extends Activity {
                         public void run() {
                             //Start preview
                             startPreview();
-                            //Set capture params
-                            setupCameraShotRequest();
 
                             //Enable capture button
                             mCaptureBtn.setEnabled(true);

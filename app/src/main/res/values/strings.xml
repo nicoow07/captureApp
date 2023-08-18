@@ -1,7 +1,7 @@
 <resources>
     <string name="app_name">Camera_params</string>
     <string name="refresh_button_text">Refresh params</string>
-    <string name="server_ip">192.168.8.95</string>
+    <string name="server_ip">192.168.8.92</string>
     <string name="config_dir">config</string>
     <string name="camera_config_file">camera_config.json</string>
 </resources>
